@@ -1,4 +1,4 @@
-# smpl-vdg
+# vdg
 
 **Video Derivative Generator** — Stanford Media Preservation Lab
 
