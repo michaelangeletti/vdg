@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+*.tar.gz
+*.whl
+
+# FFmpeg two-pass log files
+*.log
+*.log.mbtree
+
+# Temporary framemd5 validation directories
+temp_framemd5/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project-specific output artifacts (do not commit transcoded media)
+*.mp4
+*.mov
+*.jp2
+transcode_summary.csv
+process_logs/
+finished_sources/
