@@ -2,7 +2,7 @@
 vdg.cli — core logic for the Video Derivative Generator.
 
 Stanford Media Preservation Lab
-Video Derivative Generator - v1.2
+Video Derivative Generator - v1.3
 May 2026
 """
 
@@ -28,7 +28,7 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 SCRIPT_TITLE = "Stanford Media Preservation Lab"
-SCRIPT_NAME = "Video Derivative Generator, v1.2, May 2026"
+SCRIPT_NAME = "Video Derivative Generator, v1.3, May 2026"
 SCRIPT_SEPARATOR = "----"
 
 def _supports_color() -> bool:
@@ -80,6 +80,65 @@ BITRATE_CONFIG = {
 THUMBNAIL_POSITIONS = [0.10, 0.40, 0.60, 0.90]
 GOP_MULTIPLIER = 2
 VALIDATION_TIMEOUT = 300
+
+# ---------------------------------------------------------------------------
+# Embedded MediaConch policy definitions
+# ---------------------------------------------------------------------------
+# FFV1 policy — used as-is from the public MediaConch policy library.
+# Checks: Matroska container, FFV1 video, GOP N=1 (intra), per-slice CRC,
+# container-level CRC, and audio as PCM or FLAC.
+POLICY_FFV1 = """\
+<?xml version="1.0"?>
+<policy type="or" name="Video file is MKV + FFV1-Intra + PCM or FLAC with CRC32 everywhere" license="CC-BY-SA-4.0+">
+  <description>Container format is Matroska with error detection (CRC). Video format is FFV1
+with error detection (CRC) and Intra mode (each frame is independent).
+Audio format is PCM or FLAC.</description>
+  <policy type="and" name="MKV, FFV1 Intra, PCM/FLAC, error detection">
+    <rule name="Container is MKV" value="Format" tracktype="General" occurrence="*" operator="=">Matroska</rule>
+    <rule name="Video is FFV1" value="Format" tracktype="Video" occurrence="*" operator="=">FFV1</rule>
+    <rule name="GOP size of 1" value="Format_Settings_GOP" tracktype="Video" occurrence="*" operator="=">N=1</rule>
+    <rule name="Container uses error detection" value="extra/ErrorDetectionType" tracktype="General" occurrence="*" operator="=">Per level 1</rule>
+    <rule name="Video uses error detection" value="extra/ErrorDetectionType" tracktype="Video" occurrence="*" operator="=">Per slice</rule>
+    <policy type="or" name="Audio is PCM or FLAC">
+      <rule name="Audio is PCM" value="Format" tracktype="Audio" occurrence="*" operator="=">PCM</rule>
+      <rule name="Audio is FLAC" value="Format" tracktype="Audio" occurrence="*" operator="=">FLAC</rule>
+    </policy>
+  </policy>
+</policy>
+"""
+
+# v210 NTSC policy — derived from the vrecord 10-bit MOV Master public policy.
+# Audio channel count and track count are intentionally unconstrained to accommodate
+# variable configurations (mono, stereo, multi-track). All audio tracks must be
+# PCM 24-bit 48kHz little-endian signed regardless of count.
+# NTSC only — PAL support to be added when required.
+POLICY_V210_NTSC = """\
+<?xml version="1.0"?>
+<policy type="and" name="VDG v210 MOV Master (NTSC SD)">
+  <description>10-bit Uncompressed v210 QuickTime MOV, NTSC SD (720x486, 29.970fps, BFF).
+Audio must be PCM 24-bit 48kHz. Channel count and track count are not constrained.</description>
+  <rule name="Container is MPEG-4" value="Format" tracktype="General" occurrence="*" operator="=">MPEG-4</rule>
+  <rule name="Format profile is QuickTime" value="Format_Profile" tracktype="General" occurrence="*" operator="=">QuickTime</rule>
+  <rule name="File extension is mov" value="FileExtension" tracktype="General" occurrence="*" operator="=">mov</rule>
+  <rule name="Video codec is v210" value="CodecID" tracktype="Video" occurrence="*" operator="=">v210</rule>
+  <rule name="Video width is 720" value="Width" tracktype="Video" occurrence="*" operator="=">720</rule>
+  <rule name="Video height is 486" value="Height" tracktype="Video" occurrence="*" operator="=">486</rule>
+  <rule name="Video frame rate is 29.970" value="FrameRate" tracktype="Video" occurrence="*" operator="=">29.970</rule>
+  <rule name="Video standard is NTSC" value="Standard" tracktype="Video" occurrence="*" operator="=">NTSC</rule>
+  <rule name="Chroma subsampling is 4:2:2" value="ChromaSubsampling" tracktype="Video" occurrence="*" operator="=">4:2:2</rule>
+  <rule name="Bit depth is 10" value="BitDepth" tracktype="Video" occurrence="*" operator="=">10</rule>
+  <rule name="Scan type is Interlaced" value="ScanType" tracktype="Video" occurrence="*" operator="=">Interlaced</rule>
+  <rule name="Scan order is BFF" value="ScanOrder" tracktype="Video" occurrence="*" operator="=">BFF</rule>
+  <rule name="Color primaries is BT.601 NTSC" value="colour_primaries" tracktype="Video" occurrence="*" operator="=">BT.601 NTSC</rule>
+  <rule name="Transfer characteristics is BT.709" value="transfer_characteristics" tracktype="Video" occurrence="*" operator="=">BT.709</rule>
+  <rule name="Matrix coefficients is BT.601" value="matrix_coefficients" tracktype="Video" occurrence="*" operator="=">BT.601</rule>
+  <rule name="Audio format is PCM" value="Format" tracktype="Audio" occurrence="*" operator="=">PCM</rule>
+  <rule name="Audio is 24-bit" value="BitDepth" tracktype="Audio" occurrence="*" operator="=">24</rule>
+  <rule name="Audio sample rate is 48kHz" value="SamplingRate" tracktype="Audio" occurrence="*" operator="=">48000</rule>
+  <rule name="Audio is little-endian" value="Format_Settings_Endianness" tracktype="Audio" occurrence="*" operator="=">Little</rule>
+  <rule name="Audio is signed" value="Format_Settings_Sign" tracktype="Audio" occurrence="*" operator="=">Signed</rule>
+</policy>
+"""
 
 @dataclass
 class VideoInfo:
@@ -137,6 +196,8 @@ class Config:
         self.thumb_count = args.thumbs
         self.clip_ceiling = args.clip_ceiling
         self.audio_channel = args.audio_channel
+        self.keep_framemd5 = args.keep_framemd5
+        self.keep_mediaconch = args.keep_mediaconch
         self.aac_encoder = detect_aac_encoder()
         
         if not (self.output_h264 or self.output_v210 or self.output_prores or self.output_ffv1):
@@ -193,11 +254,18 @@ def detect_aac_encoder() -> str:
 
 def check_dependencies() -> bool:
     logger = logging.getLogger('video_transcoder')
+    missing_required = False
     for tool in ['ffmpeg', 'ffprobe']:
         if shutil.which(tool) is None:
             logger.error(f"Required tool '{tool}' not found in PATH")
-            return False
+            missing_required = True
+    if missing_required:
+        return False
     logger.info("All required dependencies found")
+    if shutil.which('mediaconch') is None:
+        logger.warning("mediaconch not found in PATH — policy conformance checks will be skipped")
+    else:
+        logger.info("mediaconch found — policy conformance checks enabled")
     return True
 
 def check_disk_space(output_dir: Path, required_gb: float = 10.0) -> bool:
@@ -409,7 +477,52 @@ def run_validation_command_with_spinner(cmd: List[str], description: str) -> Tup
     thread.join()
     result = result_container['result']
     return (result.returncode == 0), result.stdout
-def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Path) -> Tuple[bool, str]:
+
+def run_mediaconch_check(output_path: Path, policy_xml: str, policy_filename: str,
+                         log_dir: Path, process_log: Path, keep_policy: bool) -> Tuple[bool, str]:
+    """Write embedded policy XML to log_dir, run mediaconch against output_path,
+    log the result to process_log, and optionally retain the policy file."""
+    logger = logging.getLogger('video_transcoder')
+    if shutil.which('mediaconch') is None:
+        logger.warning("mediaconch not found — skipping policy conformance check")
+        return True, "mediaconch not available — check skipped"
+    policy_path = log_dir / policy_filename
+    try:
+        policy_path.write_text(policy_xml, encoding='utf-8')
+        cmd = ['mediaconch', '--policy', str(policy_path), str(output_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        mc_output = result.stdout.strip()
+        passed = result.returncode == 0 and 'pass' in mc_output.lower()
+        with open(process_log, 'a') as log_f:
+            log_f.write("\n" + "=" * 70 + "\n")
+            log_f.write("MEDIACONCH POLICY CHECK\n")
+            log_f.write("=" * 70 + "\n")
+            log_f.write(f"Policy:  {policy_filename}\n")
+            log_f.write(f"File:    {output_path.name}\n")
+            log_f.write(f"Result:  {'PASS' if passed else 'FAIL'}\n")
+            log_f.write(f"Output:  {mc_output}\n")
+            if result.stderr.strip():
+                log_f.write(f"Errors:  {result.stderr.strip()}\n")
+            log_f.write("=" * 70 + "\n\n")
+        if passed:
+            logger.info(f"  ✓ MediaConch policy check PASSED for {output_path.name}")
+        else:
+            logger.error(f"  ✗ MediaConch policy check FAILED for {output_path.name}")
+            logger.error(f"    {mc_output}")
+        return passed, mc_output
+    except subprocess.TimeoutExpired:
+        return False, "MediaConch check timeout"
+    except Exception as e:
+        return False, f"MediaConch check error: {e}"
+    finally:
+        if not keep_policy and policy_path.exists():
+            try:
+                policy_path.unlink()
+            except Exception:
+                pass
+def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Path,
+                           log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
+                           video_standard: VideoStandard) -> Tuple[bool, str]:
     logger = logging.getLogger('video_transcoder')
     try:
         temp_dir = output_path.parent / "temp_framemd5"
@@ -419,81 +532,103 @@ def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Pa
         logger.info(f"Validating v210 lossless conversion for {source_path.name}...")
         with open(process_log, 'a') as log_f:
             log_f.write("\n" + "=" * 70 + "\n" + "FRAMEMD5 LOSSLESS VALIDATION\n" + "=" * 70 + "\n\n")
-        
+
         logger.info("  → Generating framemd5 for source video stream...")
         cmd_source_video = ['ffmpeg', '-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
         success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
         if not success:
             return False, "Failed to generate source video framemd5"
-        with open(process_log, 'a') as log_f:
-            log_f.write("Source video framemd5 generated successfully\n")
-        
+
         logger.info("  → Generating framemd5 for output video stream...")
         cmd_output_video = ['ffmpeg', '-i', str(output_path), '-map', '0:v:0', '-f', 'framemd5', str(output_video_md5)]
         success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video")
         if not success:
             return False, "Failed to generate output video framemd5"
-        with open(process_log, 'a') as log_f:
-            log_f.write("Output video framemd5 generated successfully\n")
-        
+
         logger.info("  → Comparing video framemd5 checksums...")
         with open(source_video_md5, 'r') as f:
-            source_video_lines = f.readlines()
+            source_video_hashes = [line.strip() for line in f if not line.startswith('#')]
         with open(output_video_md5, 'r') as f:
-            output_video_lines = f.readlines()
-        source_video_hashes = [line.strip() for line in source_video_lines if not line.startswith('#')]
-        output_video_hashes = [line.strip() for line in output_video_lines if not line.startswith('#')]
-        if source_video_hashes != output_video_hashes:
-            mismatch_msg = f"Video framemd5 mismatch: {len(source_video_hashes)} source frames vs {len(output_video_hashes)} output frames"
+            output_video_hashes = [line.strip() for line in f if not line.startswith('#')]
+
+        mismatches = [(i, s, o) for i, (s, o) in enumerate(zip(source_video_hashes, output_video_hashes)) if s != o]
+        frame_count = len(source_video_hashes)
+
+        if len(source_video_hashes) != len(output_video_hashes) or mismatches:
+            mismatch_msg = (f"Video framemd5 mismatch: {len(source_video_hashes)} source frames "
+                           f"vs {len(output_video_hashes)} output frames, {len(mismatches)} differing")
             with open(process_log, 'a') as log_f:
                 log_f.write(f"ERROR: {mismatch_msg}\n")
-                for i, (src, out) in enumerate(zip(source_video_hashes[:10], output_video_hashes[:10])):
-                    if src != out:
-                        log_f.write(f"  Frame {i} mismatch:\n    Source: {src}\n    Output: {out}\n")
+                for i, src, out in mismatches:
+                    log_f.write(f"  Frame {i}:\n    Source: {src}\n    Output: {out}\n")
             return False, mismatch_msg
-        logger.info(f"  ✓ Video validation passed: {len(source_video_hashes)} frames match")
-        with open(process_log, 'a') as log_f:
-            log_f.write(f"Video validation PASSED: {len(source_video_hashes)} frames verified\n\n")
-        
+
+        logger.info(f"  ✓ Video validation passed: {frame_count} frames match")
+
         logger.info("  → Generating hash for source audio stream(s)...")
         cmd_source_audio = ['ffmpeg', '-i', str(source_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
-        success, source_audio_hash_value = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio")
+        success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio")
+        audio_passed = False
+        source_audio_hash = source_audio_hash.strip() if success else ""
+        output_audio_hash = ""
         if not success:
-            audio_error = "No audio stream or failed to generate source audio hash"
-            logger.warning(f"  ⚠ {audio_error}")
             with open(process_log, 'a') as log_f:
-                log_f.write(f"Audio validation skipped: {audio_error}\n")
+                log_f.write("Audio validation skipped: no audio stream or failed to hash source\n")
         else:
-            source_audio_hash_value = source_audio_hash_value.strip()
-            with open(process_log, 'a') as log_f:
-                log_f.write(f"Source audio hash generated: {source_audio_hash_value}\n")
-            logger.info("  → Generating hash for output audio stream(s)...")
             cmd_output_audio = ['ffmpeg', '-i', str(output_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
-            success, output_audio_hash_value = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio")
+            success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio")
+            output_audio_hash = output_audio_hash.strip()
             if not success:
                 return False, "Failed to generate output audio hash"
-            output_audio_hash_value = output_audio_hash_value.strip()
-            with open(process_log, 'a') as log_f:
-                log_f.write(f"Output audio hash generated: {output_audio_hash_value}\n")
-            logger.info("  → Comparing audio stream hashes...")
-            if source_audio_hash_value != output_audio_hash_value:
-                mismatch_msg = f"Audio streamhash mismatch:\nSource: {source_audio_hash_value}\nOutput: {output_audio_hash_value}"
+            if source_audio_hash != output_audio_hash:
+                mismatch_msg = f"Audio streamhash mismatch:\nSource: {source_audio_hash}\nOutput: {output_audio_hash}"
                 with open(process_log, 'a') as log_f:
                     log_f.write(f"ERROR: {mismatch_msg}\n")
                 return False, mismatch_msg
-            logger.info(f"  ✓ Audio validation passed: stream hashes match")
-            with open(process_log, 'a') as log_f:
-                log_f.write(f"Audio validation PASSED: {source_audio_hash_value}\n")
-        
-        try:
-            source_video_md5.unlink()
-            output_video_md5.unlink()
-            temp_dir.rmdir()
-        except Exception as e:
-            logger.warning(f"Failed to cleanup temp validation files: {e}")
+            audio_passed = True
+            logger.info("  ✓ Audio validation passed: stream hashes match")
+
+        # Always write digest to process log
         with open(process_log, 'a') as log_f:
-            log_f.write("\n" + "=" * 70 + "\n" + "LOSSLESS VALIDATION: PASSED\n" + "=" * 70 + "\n\n")
+            log_f.write("\nFRAMEMD5 DIGEST\n" + "-" * 40 + "\n")
+            log_f.write(f"Frames compared:    {frame_count}\n")
+            log_f.write(f"Video result:       PASS — all {frame_count} frames match\n")
+            if audio_passed:
+                log_f.write(f"Audio source hash:  {source_audio_hash}\n")
+                log_f.write(f"Audio output hash:  {output_audio_hash}\n")
+                log_f.write(f"Audio result:       PASS\n")
+            log_f.write("-" * 40 + "\n")
+            log_f.write("\n" + "=" * 70 + "\nLOSSLESS VALIDATION: PASSED\n" + "=" * 70 + "\n\n")
+
+        # Retain or delete framemd5 files
+        if keep_framemd5:
+            for md5_file in [source_video_md5, output_video_md5]:
+                dest = log_dir / md5_file.name
+                md5_file.rename(dest)
+                logger.info(f"  → framemd5 retained: {dest.name}")
+        else:
+            for md5_file in [source_video_md5, output_video_md5]:
+                try:
+                    md5_file.unlink()
+                except Exception:
+                    pass
+        try:
+            temp_dir.rmdir()
+        except Exception:
+            pass
+
         logger.info(f"  ✓ v210 lossless validation PASSED for {source_path.name}")
+
+        # MediaConch policy check — NTSC only for now
+        if video_standard == VideoStandard.NTSC:
+            mc_passed, mc_msg = run_mediaconch_check(
+                output_path, POLICY_V210_NTSC, "policy_v210_ntsc.xml",
+                log_dir, process_log, keep_mediaconch)
+            if not mc_passed:
+                return False, f"MediaConch policy check failed: {mc_msg}"
+        else:
+            logger.info("  → MediaConch policy check skipped (no policy defined for this video standard)")
+
         return True, "Validation passed"
     except subprocess.TimeoutExpired:
         return False, "Validation timeout"
@@ -639,7 +774,8 @@ def process_h264_output(source_path: Path, output_path: Path, info: VideoInfo, c
         logging.getLogger('video_transcoder').error(f"H264 processing error: {e}")
         return False
 
-def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, video_standard: VideoStandard, process_log: Path) -> bool:
+def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, video_standard: VideoStandard,
+                        process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool) -> bool:
     logger = logging.getLogger('video_transcoder')
     try:
         setfield = "bff" if video_standard == VideoStandard.NTSC else "tff"
@@ -653,7 +789,9 @@ def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, v
         if not success:
             return False
         logger.info(f"Starting framemd5 lossless validation for {source_path.name}")
-        is_valid, validation_msg = validate_v210_lossless(source_path, output_path, process_log)
+        is_valid, validation_msg = validate_v210_lossless(
+            source_path, output_path, process_log, log_dir,
+            keep_framemd5, keep_mediaconch, video_standard)
         if not is_valid:
             logger.error(f"v210 lossless validation FAILED: {validation_msg}")
             if output_path.exists():
@@ -675,9 +813,10 @@ def process_prores_output(source_path: Path, output_path: Path, info: VideoInfo,
         logging.getLogger('video_transcoder').error(f"ProRes processing error: {e}")
         return False
 
-def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Path) -> Tuple[bool, str]:
-    """Framemd5 + audio streamhash validation for FFV1 output.
-    Reuses the same logic as validate_v210_lossless but with FFV1-specific log labels."""
+def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Path,
+                           log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool) -> Tuple[bool, str]:
+    """Framemd5 + audio streamhash validation for FFV1 output, with digest logging,
+    optional framemd5 file retention, and MediaConch policy check."""
     logger = logging.getLogger('video_transcoder')
     try:
         temp_dir = output_path.parent / "temp_framemd5"
@@ -693,73 +832,94 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
         success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
         if not success:
             return False, "Failed to generate source video framemd5"
-        with open(process_log, 'a') as log_f:
-            log_f.write("Source video framemd5 generated successfully\n")
 
         logger.info("  → Generating framemd5 for output video stream...")
         cmd_output_video = ['ffmpeg', '-i', str(output_path), '-map', '0:v:0', '-f', 'framemd5', str(output_video_md5)]
         success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video")
         if not success:
             return False, "Failed to generate output video framemd5"
-        with open(process_log, 'a') as log_f:
-            log_f.write("Output video framemd5 generated successfully\n")
 
         logger.info("  → Comparing video framemd5 checksums...")
         with open(source_video_md5, 'r') as f:
             source_video_hashes = [line.strip() for line in f if not line.startswith('#')]
         with open(output_video_md5, 'r') as f:
             output_video_hashes = [line.strip() for line in f if not line.startswith('#')]
-        if source_video_hashes != output_video_hashes:
-            mismatch_msg = f"Video framemd5 mismatch: {len(source_video_hashes)} source frames vs {len(output_video_hashes)} output frames"
+
+        mismatches = [(i, s, o) for i, (s, o) in enumerate(zip(source_video_hashes, output_video_hashes)) if s != o]
+        frame_count = len(source_video_hashes)
+
+        if len(source_video_hashes) != len(output_video_hashes) or mismatches:
+            mismatch_msg = (f"Video framemd5 mismatch: {len(source_video_hashes)} source frames "
+                           f"vs {len(output_video_hashes)} output frames, {len(mismatches)} differing")
             with open(process_log, 'a') as log_f:
                 log_f.write(f"ERROR: {mismatch_msg}\n")
-                for i, (src, out) in enumerate(zip(source_video_hashes[:10], output_video_hashes[:10])):
-                    if src != out:
-                        log_f.write(f"  Frame {i} mismatch:\n    Source: {src}\n    Output: {out}\n")
+                for i, src, out in mismatches:
+                    log_f.write(f"  Frame {i}:\n    Source: {src}\n    Output: {out}\n")
             return False, mismatch_msg
-        logger.info(f"  ✓ Video validation passed: {len(source_video_hashes)} frames match")
-        with open(process_log, 'a') as log_f:
-            log_f.write(f"Video validation PASSED: {len(source_video_hashes)} frames verified\n\n")
+
+        logger.info(f"  ✓ Video validation passed: {frame_count} frames match")
 
         logger.info("  → Generating hash for source audio stream(s)...")
         cmd_source_audio = ['ffmpeg', '-i', str(source_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
         success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio")
+        audio_passed = False
+        source_audio_hash = source_audio_hash.strip() if success else ""
+        output_audio_hash = ""
         if not success:
-            audio_error = "No audio stream or failed to generate source audio hash"
-            logger.warning(f"  ⚠ {audio_error}")
             with open(process_log, 'a') as log_f:
-                log_f.write(f"Audio validation skipped: {audio_error}\n")
+                log_f.write("Audio validation skipped: no audio stream or failed to hash source\n")
         else:
-            source_audio_hash = source_audio_hash.strip()
-            with open(process_log, 'a') as log_f:
-                log_f.write(f"Source audio hash: {source_audio_hash}\n")
-            logger.info("  → Generating hash for output audio stream(s)...")
             cmd_output_audio = ['ffmpeg', '-i', str(output_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
             success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio")
+            output_audio_hash = output_audio_hash.strip()
             if not success:
                 return False, "Failed to generate output audio hash"
-            output_audio_hash = output_audio_hash.strip()
-            with open(process_log, 'a') as log_f:
-                log_f.write(f"Output audio hash: {output_audio_hash}\n")
-            logger.info("  → Comparing audio stream hashes...")
             if source_audio_hash != output_audio_hash:
                 mismatch_msg = f"Audio streamhash mismatch:\nSource: {source_audio_hash}\nOutput: {output_audio_hash}"
                 with open(process_log, 'a') as log_f:
                     log_f.write(f"ERROR: {mismatch_msg}\n")
                 return False, mismatch_msg
+            audio_passed = True
             logger.info("  ✓ Audio validation passed: stream hashes match")
-            with open(process_log, 'a') as log_f:
-                log_f.write(f"Audio validation PASSED: {source_audio_hash}\n")
 
-        try:
-            source_video_md5.unlink()
-            output_video_md5.unlink()
-            temp_dir.rmdir()
-        except Exception as e:
-            logger.warning(f"Failed to cleanup temp validation files: {e}")
+        # Always write digest to process log
         with open(process_log, 'a') as log_f:
-            log_f.write("\n" + "=" * 70 + "\n" + "LOSSLESS VALIDATION: PASSED\n" + "=" * 70 + "\n\n")
+            log_f.write("\nFRAMEMD5 DIGEST\n" + "-" * 40 + "\n")
+            log_f.write(f"Frames compared:    {frame_count}\n")
+            log_f.write(f"Video result:       PASS — all {frame_count} frames match\n")
+            if audio_passed:
+                log_f.write(f"Audio source hash:  {source_audio_hash}\n")
+                log_f.write(f"Audio output hash:  {output_audio_hash}\n")
+                log_f.write(f"Audio result:       PASS\n")
+            log_f.write("-" * 40 + "\n")
+            log_f.write("\n" + "=" * 70 + "\nLOSSLESS VALIDATION: PASSED\n" + "=" * 70 + "\n\n")
+
+        # Retain or delete framemd5 files
+        if keep_framemd5:
+            for md5_file in [source_video_md5, output_video_md5]:
+                dest = log_dir / md5_file.name
+                md5_file.rename(dest)
+                logger.info(f"  → framemd5 retained: {dest.name}")
+        else:
+            for md5_file in [source_video_md5, output_video_md5]:
+                try:
+                    md5_file.unlink()
+                except Exception:
+                    pass
+        try:
+            temp_dir.rmdir()
+        except Exception:
+            pass
+
         logger.info(f"  ✓ FFV1 lossless validation PASSED for {source_path.name}")
+
+        # MediaConch policy check
+        mc_passed, mc_msg = run_mediaconch_check(
+            output_path, POLICY_FFV1, "policy_ffv1.xml",
+            log_dir, process_log, keep_mediaconch)
+        if not mc_passed:
+            return False, f"MediaConch policy check failed: {mc_msg}"
+
         return True, "Validation passed"
     except subprocess.TimeoutExpired:
         return False, "Validation timeout"
@@ -767,16 +927,17 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
         logger.error(f"Validation error: {e}")
         return False, f"Validation error: {e}"
 
-def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo, process_log: Path) -> bool:
+def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
+                        process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool) -> bool:
     """Encode source to FFV1 v3 in MKV with lossless framemd5 + audio hash validation.
 
     FFV1 parameters:
-      -level 3      FFV1 version 3 — supports multithreading, per-slice CRCs, and
-                    is the only version accepted by most digital preservation repositories.
-      -g 1          Keyframe every frame. Required for random access and error recovery
-                    in archival use; prevents dependency chains across frames.
-      -slices 16    Slice-based multithreading. 16 slices is a reasonable default for
-                    Apple Silicon and modern x86; harmless on slower machines.
+      -level 3      FFV1 version 3 — multithreading, per-slice CRCs, accepted by
+                    most digital preservation repositories.
+      -g 1          Keyframe every frame. Required for random access and error
+                    recovery in archival use.
+      -slices 16    Slice-based multithreading. 16 slices is appropriate for
+                    Apple Silicon and modern x86.
       -slicecrc 1   Embeds a CRC in every slice header for per-slice error detection.
       Audio is copied without re-encoding to preserve the original PCM stream exactly.
     """
@@ -793,7 +954,8 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo, p
         if not success:
             return False
         logger.info(f"Starting framemd5 lossless validation for {source_path.name}")
-        is_valid, validation_msg = validate_ffv1_lossless(source_path, output_path, process_log)
+        is_valid, validation_msg = validate_ffv1_lossless(
+            source_path, output_path, process_log, log_dir, keep_framemd5, keep_mediaconch)
         if not is_valid:
             logger.error(f"FFV1 lossless validation FAILED: {validation_msg}")
             if output_path.exists():
@@ -887,7 +1049,8 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
             logger.info(f"Encoding v210 for {base_name}")
             if video_standard == VideoStandard.UNKNOWN:
                 raise Exception("Cannot create v210 output: video is not NTSC or PAL standard")
-            if not process_v210_output(source_path, output_paths['v210'], info, video_standard, process_log):
+            if not process_v210_output(source_path, output_paths['v210'], info, video_standard,
+                                       process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch):
                 raise Exception("v210 encoding failed")
         if config.output_prores:
             logger.info(f"Encoding ProRes for {base_name}")
@@ -895,7 +1058,8 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
                 raise Exception("ProRes encoding failed")
         if config.output_ffv1:
             logger.info(f"Encoding FFV1/MKV for {base_name}")
-            if not process_ffv1_output(source_path, output_paths['ffv1'], info, process_log):
+            if not process_ffv1_output(source_path, output_paths['ffv1'], info,
+                                       process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch):
                 raise Exception("FFV1 encoding failed")
         
         if config.move_finished and not config.dry_run:
@@ -1058,6 +1222,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--no-move-finished', dest='move_finished', action='store_false', help='Do not move source files after processing')
     parser.add_argument('--dry-run', action='store_true', help='Simulate processing without making changes')
     parser.add_argument('--skip-validation', action='store_true', help='Skip output file validation (faster but less safe)')
+    parser.add_argument('--keep-framemd5', action='store_true',
+                        help='Retain framemd5 files in process_logs/ after lossless validation instead of deleting them. '
+                             'Applies to both -ffv1 and -v210 output. A digest summary is always written to the process '
+                             'log regardless of this flag.')
+    parser.add_argument('--keep-mediaconch', action='store_true',
+                        help='Retain the MediaConch policy XML written to process_logs/ after conformance checks '
+                             'instead of deleting it. One policy file per format per session.')
     parser.add_argument('--force-scan', type=str, choices=['progressive', 'tff', 'bff'], default=None,
                         help='Override scan type detection: progressive (skip deinterlace), tff (top field first), bff (bottom field first)')
     parser.add_argument('--force-fps', type=float, default=None,
