@@ -489,7 +489,7 @@ def run_mediaconch_check(output_path: Path, policy_xml: str, policy_filename: st
     policy_path = log_dir / policy_filename
     try:
         policy_path.write_text(policy_xml, encoding='utf-8')
-        cmd = ['mediaconch', '--policy', str(policy_path), str(output_path)]
+        cmd = ['mediaconch', f'--Policy={str(policy_path)}', str(output_path)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         mc_output = result.stdout.strip()
         passed = result.returncode == 0 and 'pass' in mc_output.lower()
