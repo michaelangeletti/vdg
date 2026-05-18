@@ -2,7 +2,7 @@
 vdg.cli — core logic for the Video Derivative Generator.
 
 Stanford Media Preservation Lab
-Video Derivative Generator - v1.1
+Video Derivative Generator - v1.2
 May 2026
 """
 
@@ -28,17 +28,32 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 SCRIPT_TITLE = "Stanford Media Preservation Lab"
-SCRIPT_NAME = "Video Derivative Generator, v1.1, May 2026"
+SCRIPT_NAME = "Video Derivative Generator, v1.2, May 2026"
 SCRIPT_SEPARATOR = "----"
 
+def _supports_color() -> bool:
+    """Return True if the terminal supports ANSI color codes.
+    Checks isatty(), the TERM variable, and the NO_COLOR convention."""
+    if os.environ.get('NO_COLOR'):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    term = os.environ.get('TERM', '')
+    colorterm = os.environ.get('COLORTERM', '')
+    if colorterm in ('truecolor', '24bit', 'yes'):
+        return True
+    return any(t in term for t in ('xterm', 'color', 'ansi', 'vt100', 'linux', 'screen', 'tmux'))
+
+_COLOR = _supports_color()
+
 class Colors:
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
+    GREEN  = '\033[92m' if _COLOR else ''
+    YELLOW = '\033[93m' if _COLOR else ''
+    RED    = '\033[91m' if _COLOR else ''
+    BLUE   = '\033[94m' if _COLOR else ''
+    CYAN   = '\033[96m' if _COLOR else ''
+    BOLD   = '\033[1m'  if _COLOR else ''
+    RESET  = '\033[0m'  if _COLOR else ''
 
 class ProcessStatus(Enum):
     SUCCESS = "Success"
@@ -113,6 +128,7 @@ class Config:
         self.output_h264 = args.h264
         self.output_v210 = args.v210
         self.output_prores = args.prores
+        self.output_ffv1 = args.ffv1
         self.audio_stream = args.audio_stream
         self.audio_mode = args.audio_mode
         self.audio_pan_center = args.audio_pan_center
@@ -120,10 +136,11 @@ class Config:
         self.force_fps = args.force_fps
         self.thumb_count = args.thumbs
         self.clip_ceiling = args.clip_ceiling
+        self.audio_channel = args.audio_channel
         self.aac_encoder = detect_aac_encoder()
         
-        if not (self.output_h264 or self.output_v210 or self.output_prores):
-            raise ValueError("At least one output format must be specified (-h264, -v210, or -prores)")
+        if not (self.output_h264 or self.output_v210 or self.output_prores or self.output_ffv1):
+            raise ValueError("At least one output format must be specified (-h264, -v210, -prores, or -ffv1)")
         if not self.source_dir.exists():
             raise FileNotFoundError(f"Source directory does not exist: {self.source_dir}")
         for directory in [self.output_dir, self.log_dir, self.finished_dir]:
@@ -345,10 +362,12 @@ def build_audio_filter_and_mapping(config: Config, info: VideoInfo) -> Tuple[Lis
             audio_description = f"Stereo {config.audio_stream}"
     elif config.audio_mode == 'mono-duplicate':
         audio_mapping = ["-map", config.audio_stream]
-        pan = "pan=stereo|c0=c0|c1=c0"
+        ch = f"c{config.audio_channel}"
+        pan = f"pan=stereo|c0={ch}|c1={ch}"
         af = f"{pan},{clip_filter}" if clip_filter else pan
         audio_filter_args = ["-af", af]
-        audio_description = f"Mono {config.audio_stream} (duplicated to L+R){clip_desc}"
+        channel_label = "L" if config.audio_channel == 0 else "R" if config.audio_channel == 1 else f"c{config.audio_channel}"
+        audio_description = f"Mono {config.audio_stream} ch{config.audio_channel} ({channel_label}, duplicated to L+R){clip_desc}"
     elif config.audio_mode == 'mono-merge':
         audio_mapping = []
         base_fc = "[0:a:0][0:a:1]amerge=inputs=2,pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1"
@@ -656,6 +675,135 @@ def process_prores_output(source_path: Path, output_path: Path, info: VideoInfo,
         logging.getLogger('video_transcoder').error(f"ProRes processing error: {e}")
         return False
 
+def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Path) -> Tuple[bool, str]:
+    """Framemd5 + audio streamhash validation for FFV1 output.
+    Reuses the same logic as validate_v210_lossless but with FFV1-specific log labels."""
+    logger = logging.getLogger('video_transcoder')
+    try:
+        temp_dir = output_path.parent / "temp_framemd5"
+        temp_dir.mkdir(exist_ok=True)
+        source_video_md5 = temp_dir / f"{source_path.stem}_source_video.framemd5"
+        output_video_md5 = temp_dir / f"{output_path.stem}_output_video.framemd5"
+        logger.info(f"Validating FFV1 lossless conversion for {source_path.name}...")
+        with open(process_log, 'a') as log_f:
+            log_f.write("\n" + "=" * 70 + "\n" + "FRAMEMD5 LOSSLESS VALIDATION (FFV1)\n" + "=" * 70 + "\n\n")
+
+        logger.info("  → Generating framemd5 for source video stream...")
+        cmd_source_video = ['ffmpeg', '-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
+        success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
+        if not success:
+            return False, "Failed to generate source video framemd5"
+        with open(process_log, 'a') as log_f:
+            log_f.write("Source video framemd5 generated successfully\n")
+
+        logger.info("  → Generating framemd5 for output video stream...")
+        cmd_output_video = ['ffmpeg', '-i', str(output_path), '-map', '0:v:0', '-f', 'framemd5', str(output_video_md5)]
+        success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video")
+        if not success:
+            return False, "Failed to generate output video framemd5"
+        with open(process_log, 'a') as log_f:
+            log_f.write("Output video framemd5 generated successfully\n")
+
+        logger.info("  → Comparing video framemd5 checksums...")
+        with open(source_video_md5, 'r') as f:
+            source_video_hashes = [line.strip() for line in f if not line.startswith('#')]
+        with open(output_video_md5, 'r') as f:
+            output_video_hashes = [line.strip() for line in f if not line.startswith('#')]
+        if source_video_hashes != output_video_hashes:
+            mismatch_msg = f"Video framemd5 mismatch: {len(source_video_hashes)} source frames vs {len(output_video_hashes)} output frames"
+            with open(process_log, 'a') as log_f:
+                log_f.write(f"ERROR: {mismatch_msg}\n")
+                for i, (src, out) in enumerate(zip(source_video_hashes[:10], output_video_hashes[:10])):
+                    if src != out:
+                        log_f.write(f"  Frame {i} mismatch:\n    Source: {src}\n    Output: {out}\n")
+            return False, mismatch_msg
+        logger.info(f"  ✓ Video validation passed: {len(source_video_hashes)} frames match")
+        with open(process_log, 'a') as log_f:
+            log_f.write(f"Video validation PASSED: {len(source_video_hashes)} frames verified\n\n")
+
+        logger.info("  → Generating hash for source audio stream(s)...")
+        cmd_source_audio = ['ffmpeg', '-i', str(source_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
+        success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio")
+        if not success:
+            audio_error = "No audio stream or failed to generate source audio hash"
+            logger.warning(f"  ⚠ {audio_error}")
+            with open(process_log, 'a') as log_f:
+                log_f.write(f"Audio validation skipped: {audio_error}\n")
+        else:
+            source_audio_hash = source_audio_hash.strip()
+            with open(process_log, 'a') as log_f:
+                log_f.write(f"Source audio hash: {source_audio_hash}\n")
+            logger.info("  → Generating hash for output audio stream(s)...")
+            cmd_output_audio = ['ffmpeg', '-i', str(output_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
+            success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio")
+            if not success:
+                return False, "Failed to generate output audio hash"
+            output_audio_hash = output_audio_hash.strip()
+            with open(process_log, 'a') as log_f:
+                log_f.write(f"Output audio hash: {output_audio_hash}\n")
+            logger.info("  → Comparing audio stream hashes...")
+            if source_audio_hash != output_audio_hash:
+                mismatch_msg = f"Audio streamhash mismatch:\nSource: {source_audio_hash}\nOutput: {output_audio_hash}"
+                with open(process_log, 'a') as log_f:
+                    log_f.write(f"ERROR: {mismatch_msg}\n")
+                return False, mismatch_msg
+            logger.info("  ✓ Audio validation passed: stream hashes match")
+            with open(process_log, 'a') as log_f:
+                log_f.write(f"Audio validation PASSED: {source_audio_hash}\n")
+
+        try:
+            source_video_md5.unlink()
+            output_video_md5.unlink()
+            temp_dir.rmdir()
+        except Exception as e:
+            logger.warning(f"Failed to cleanup temp validation files: {e}")
+        with open(process_log, 'a') as log_f:
+            log_f.write("\n" + "=" * 70 + "\n" + "LOSSLESS VALIDATION: PASSED\n" + "=" * 70 + "\n\n")
+        logger.info(f"  ✓ FFV1 lossless validation PASSED for {source_path.name}")
+        return True, "Validation passed"
+    except subprocess.TimeoutExpired:
+        return False, "Validation timeout"
+    except Exception as e:
+        logger.error(f"Validation error: {e}")
+        return False, f"Validation error: {e}"
+
+def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo, process_log: Path) -> bool:
+    """Encode source to FFV1 v3 in MKV with lossless framemd5 + audio hash validation.
+
+    FFV1 parameters:
+      -level 3      FFV1 version 3 — supports multithreading, per-slice CRCs, and
+                    is the only version accepted by most digital preservation repositories.
+      -g 1          Keyframe every frame. Required for random access and error recovery
+                    in archival use; prevents dependency chains across frames.
+      -slices 16    Slice-based multithreading. 16 slices is a reasonable default for
+                    Apple Silicon and modern x86; harmless on slower machines.
+      -slicecrc 1   Embeds a CRC in every slice header for per-slice error detection.
+      Audio is copied without re-encoding to preserve the original PCM stream exactly.
+    """
+    logger = logging.getLogger('video_transcoder')
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", str(source_path),
+            "-map", "0:v", "-map", "0:a",
+            "-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", "16", "-slicecrc", "1",
+            "-c:a", "copy",
+            str(output_path)
+        ]
+        success, _ = run_ffmpeg_with_progress(cmd, info.total_frames, f"FFV1: {source_path.name[:20]}", process_log)
+        if not success:
+            return False
+        logger.info(f"Starting framemd5 lossless validation for {source_path.name}")
+        is_valid, validation_msg = validate_ffv1_lossless(source_path, output_path, process_log)
+        if not is_valid:
+            logger.error(f"FFV1 lossless validation FAILED: {validation_msg}")
+            if output_path.exists():
+                output_path.unlink()
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"FFV1 processing error: {e}")
+        return False
+
 ROLE_CODES = ('_pm', '_sh', '_sl')
 
 def sanitize_filename(name: str) -> str:
@@ -687,6 +835,10 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
         output_paths['prores'] = config.output_dir / f"{base_stem}_sh.mov"
     else:
         output_paths['prores'] = None
+    if config.output_ffv1:
+        output_paths['ffv1'] = config.output_dir / f"{base_stem}_pm.mkv"
+    else:
+        output_paths['ffv1'] = None
     
     thumbnail_prefix = base_stem if config.output_h264 else None
     num_thumbs = config.thumb_count if config.thumb_count is not None else len(THUMBNAIL_POSITIONS)
@@ -741,6 +893,10 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
             logger.info(f"Encoding ProRes for {base_name}")
             if not process_prores_output(source_path, output_paths['prores'], info, process_log):
                 raise Exception("ProRes encoding failed")
+        if config.output_ffv1:
+            logger.info(f"Encoding FFV1/MKV for {base_name}")
+            if not process_ffv1_output(source_path, output_paths['ffv1'], info, process_log):
+                raise Exception("FFV1 encoding failed")
         
         if config.move_finished and not config.dry_run:
             shutil.move(str(source_path), str(config.finished_dir / base_name))
@@ -893,6 +1049,7 @@ def process_batch(config: Config) -> ProcessingStats:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Video Transcoding and Archival Pipeline', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--version', action='version', version=SCRIPT_NAME)
     parser.add_argument('--source-dir', type=str, default='/Users/mangelet/Desktop/In_Progress/1/source', help='Source directory containing video files')
     parser.add_argument('--output-dir', type=str, default='/Users/mangelet/Desktop/In_Progress/1/output', help='Output directory for processed files')
     parser.add_argument('--workers', type=int, default=1, help='Number of parallel workers (1 = sequential)')
@@ -910,10 +1067,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('-h264', action='store_true', help='Generate H.264 MP4 output with thumbnails (_sl.mp4)')
     parser.add_argument('-v210', action='store_true', help='Generate v210 uncompressed 10-bit 4:2:2 QuickTime output (.mov)')
     parser.add_argument('-prores', action='store_true', help='Generate ProRes 422 HQ QuickTime output (_sh.mov)')
+    parser.add_argument('-ffv1', action='store_true', help='Generate FFV1 v3 lossless MKV output (_pm.mkv) with framemd5 validation')
     audio_group = parser.add_argument_group('Audio Configuration (H.264 only)')
     audio_group.add_argument('--audio-stream', type=str, default='0:a:0', help='Audio stream to use (default: 0:a:0). Examples: 0:a:0, 0:a:1')
     audio_group.add_argument('--audio-mode', type=str, choices=['stereo', 'mono-duplicate', 'mono-merge'], default='stereo', help='Audio processing mode: stereo (default), mono-duplicate, mono-merge')
     audio_group.add_argument('--audio-pan-center', action='store_true', help='Pan/mix stereo channels to center (music+dialogue to both L+R)')
+    audio_group.add_argument('--audio-channel', type=int, default=0,
+                             help='Channel index to use with --audio-mode mono-duplicate. '
+                                  '0 = left (default), 1 = right. The selected channel is duplicated to both L and R output channels.')
     audio_group.add_argument('--clip-ceiling', type=float, default=None,
                              help='Apply a peak ceiling to audio output at the specified level in dBFS (e.g. -10). '
                                   'Uses dynaudnorm with max gain = 1.0 so it only reduces, never boosts — '
