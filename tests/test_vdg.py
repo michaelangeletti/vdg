@@ -15,6 +15,8 @@ from vdg.cli import (
     detect_video_standard,
     calculate_output_fps,
     get_bitrate_config,
+    compute_colliding_stems,
+    clean_aperture_input_args,
     VideoStandard,
     ROLE_CODES,
 )
@@ -191,3 +193,66 @@ class TestGetBitrateConfig:
     def test_hd_1080(self):
         cfg = get_bitrate_config(1080)
         assert cfg['bitrate'] == '2800k'
+
+
+# ---------------------------------------------------------------------------
+# calculate_scaling_params — force_anamorphic override
+# ---------------------------------------------------------------------------
+
+class TestCalculateScalingParamsForceAnamorphic:
+    def test_force_overrides_4x3_dar(self):
+        # Mistagged 4:3 that is actually anamorphic squeezed 16:9 footage
+        assert calculate_scaling_params(720, 480, "4:3", force_anamorphic=True) == "854:480"
+
+    def test_force_486_height(self):
+        assert calculate_scaling_params(720, 486, "4:3", force_anamorphic=True) == "854:480"
+
+    def test_force_pal_576_height(self):
+        assert calculate_scaling_params(720, 576, "4:3", force_anamorphic=True) == "854:480"
+
+    def test_force_false_uses_detected_dar(self):
+        assert calculate_scaling_params(720, 480, "4:3", force_anamorphic=False) == "640:480"
+
+    def test_force_ignored_for_hd_dimensions(self):
+        # Flag only applies to SD (720-wide) sources
+        result = calculate_scaling_params(1920, 1080, "4:3", force_anamorphic=True)
+        assert result != "854:480"
+
+
+# ---------------------------------------------------------------------------
+# compute_colliding_stems
+# ---------------------------------------------------------------------------
+
+class TestComputeCollidingStems:
+    def test_same_id_different_role_codes_collide(self):
+        files = [
+            Path("wb824kh0844_At_Home_But_Not_At_Home_2020_pm.mov"),
+            Path("wb824kh0844_At_Home_But_Not_At_Home_2020_sh.mp4"),
+        ]
+        assert compute_colliding_stems(files) == {"wb824kh0844_At_Home_But_Not_At_Home_2020"}
+
+    def test_unique_stems_do_not_collide(self):
+        files = [
+            Path("file_one_pm.mov"),
+            Path("file_two_sh.mp4"),
+        ]
+        assert compute_colliding_stems(files) == set()
+
+    def test_no_role_code_no_collision(self):
+        files = [Path("vendor_delivery.mov")]
+        assert compute_colliding_stems(files) == set()
+
+    def test_empty_file_list(self):
+        assert compute_colliding_stems([]) == set()
+
+
+# ---------------------------------------------------------------------------
+# clean_aperture_input_args
+# ---------------------------------------------------------------------------
+
+class TestCleanApertureInputArgs:
+    def test_default_disables_clap_crop(self):
+        assert clean_aperture_input_args(False) == ["-flags2", "+ignorecrop"]
+
+    def test_clean_aperture_true_omits_flag(self):
+        assert clean_aperture_input_args(True) == []

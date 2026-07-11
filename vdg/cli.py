@@ -60,6 +60,7 @@ class ProcessStatus(Enum):
     ERROR = "Error"
     SKIPPED = "Skipped"
     INCOMPLETE = "Incomplete"
+    QUARANTINED = "Quarantined"
 
 class VideoStandard(Enum):
     NTSC = "ntsc"
@@ -151,6 +152,7 @@ class VideoInfo:
     total_frames: int
     codec: str
     interlaced: bool
+    is_vfr: bool
 
 @dataclass
 class ProcessingResult:
@@ -166,17 +168,22 @@ class ProcessingStats:
     success: int = 0
     error: int = 0
     skipped: int = 0
+    quarantined: int = 0
     failed_files: List[str] = None
-    
+    quarantined_files: List[str] = None
+
     def __post_init__(self):
         if self.failed_files is None:
             self.failed_files = []
+        if self.quarantined_files is None:
+            self.quarantined_files = []
 
 class Config:
     def __init__(self, args: argparse.Namespace):
         self.source_dir = Path(args.source_dir)
         self.output_dir = Path(args.output_dir)
         self.finished_dir = self.source_dir / "finished_sources"
+        self.quarantine_dir = self.output_dir / "QUARANTINE"
         self.log_dir = self.output_dir / "process_logs"
         self.csv_log = self.output_dir / "transcode_summary.csv"
         self.cleanup_only = args.cleanup_only
@@ -198,13 +205,15 @@ class Config:
         self.audio_channel = args.audio_channel
         self.keep_framemd5 = args.keep_framemd5
         self.keep_mediaconch = args.keep_mediaconch
+        self.clean_aperture = args.clean_aperture
+        self.force_anamorphic = args.force_anamorphic
         self.aac_encoder = detect_aac_encoder()
-        
+
         if not (self.output_h264 or self.output_v210 or self.output_prores or self.output_ffv1):
             raise ValueError("At least one output format must be specified (-h264, -v210, -prores, or -ffv1)")
         if not self.source_dir.exists():
             raise FileNotFoundError(f"Source directory does not exist: {self.source_dir}")
-        for directory in [self.output_dir, self.log_dir, self.finished_dir]:
+        for directory in [self.output_dir, self.log_dir, self.finished_dir, self.quarantine_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 def setup_logging(log_dir: Path, dry_run: bool) -> logging.Logger:
     logger = logging.getLogger('video_transcoder')
@@ -326,6 +335,15 @@ def get_file_info_for_display(file_path: Path) -> Tuple[int, float]:
     except Exception:
         return 0, 0.0
 
+def _parse_frame_rate(rate_str: str) -> float:
+    """Safely parse an ffprobe 'num/den' frame rate string to a float."""
+    try:
+        num, den = rate_str.split('/')
+        den = float(den)
+        return float(num) / den if den else 0.0
+    except Exception:
+        return 0.0
+
 def get_video_info(file_path: Path) -> VideoInfo:
     cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', str(file_path)]
     try:
@@ -353,16 +371,28 @@ def get_video_info(file_path: Path) -> VideoInfo:
     total_frames = int(v_stream.get('nb_frames', 0))
     if total_frames == 0:
         total_frames = int(duration * fps)
-    
+
     # Detect interlacing
     field_order = v_stream.get('field_order', 'progressive')
     interlaced = field_order not in ['progressive', 'unknown']
-    
+
+    # VFR detection: r_frame_rate (the stream's nominal/guessed rate) diverging
+    # from avg_frame_rate (total_frames/duration) indicates the source is not CFR.
+    r_fps = _parse_frame_rate(v_stream.get('r_frame_rate', '0/1'))
+    is_vfr = r_fps > 0 and fps > 0 and abs(r_fps - fps) > 0.05
+
+    # Use coded (full sample buffer) dimensions rather than display dimensions —
+    # macOS FFmpeg 7.x+ honors QuickTime clap clean aperture atoms and reports
+    # cropped display dimensions here, which understates the true frame size
+    # for lossless preservation encoding.
+    width = int(v_stream.get('coded_width') or v_stream['width'])
+    height = int(v_stream.get('coded_height') or v_stream['height'])
+
     return VideoInfo(
-        width=int(v_stream['width']), height=int(v_stream['height']), duration=duration,
+        width=width, height=height, duration=duration,
         fps=fps, dar=v_stream.get('display_aspect_ratio', '4:3'), has_audio=a_stream is not None,
         total_frames=total_frames, codec=v_stream.get('codec_name', 'unknown'),
-        interlaced=interlaced
+        interlaced=interlaced, is_vfr=is_vfr
     )
 
 def detect_video_standard(width: int, height: int, fps: float) -> VideoStandard:
@@ -372,7 +402,11 @@ def detect_video_standard(width: int, height: int, fps: float) -> VideoStandard:
         return VideoStandard.PAL
     return VideoStandard.UNKNOWN
 
-def calculate_scaling_params(width: int, height: int, dar: str) -> str:
+def calculate_scaling_params(width: int, height: int, dar: str, force_anamorphic: bool = False) -> str:
+    if force_anamorphic and width == 720 and height in [480, 486, 576]:
+        # Content digitized as 4:3 full frame but actually anamorphic (squeezed 16:9) —
+        # detected DAR is unreliable here, so the caller overrides it explicitly.
+        return "854:480"
     if height == 576 and width == 720:
         return "854:480" if dar == "16:9" else "640:480"
     elif height in [480, 486] and width == 720:
@@ -709,7 +743,7 @@ def process_h264_output(source_path: Path, output_path: Path, info: VideoInfo, c
     try:
         out_fps = calculate_output_fps(info.fps)
         gop = math.ceil(out_fps * GOP_MULTIPLIER)
-        scale_string = calculate_scaling_params(info.width, info.height, info.dar)
+        scale_string = calculate_scaling_params(info.width, info.height, info.dar, config.force_anamorphic)
         bitrate_cfg = get_bitrate_config(info.height)
         
         # Build filter chain - only deinterlace if source is interlaced
@@ -774,13 +808,25 @@ def process_h264_output(source_path: Path, output_path: Path, info: VideoInfo, c
         logging.getLogger('video_transcoder').error(f"H264 processing error: {e}")
         return False
 
+def clean_aperture_input_args(clean_aperture: bool) -> List[str]:
+    """Input-side ffmpeg args controlling QuickTime clean aperture (clap) handling.
+
+    Default (clean_aperture=False) disables automatic clap-based cropping so the
+    full coded frame is preserved — required for true lossless v210/FFV1 transcodes.
+    Passing clean_aperture=True omits this, letting ffmpeg apply its native
+    clap crop and produce display-cropped output instead.
+    """
+    return [] if clean_aperture else ["-flags2", "+ignorecrop"]
+
 def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, video_standard: VideoStandard,
-                        process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool) -> bool:
+                        process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
+                        clean_aperture: bool = False) -> bool:
     logger = logging.getLogger('video_transcoder')
     try:
         setfield = "bff" if video_standard == VideoStandard.NTSC else "tff"
         setsar = "10/11" if video_standard == VideoStandard.NTSC else "12/11"
-        cmd = ["ffmpeg", "-y", "-i", str(source_path), "-movflags", "write_colr", "-c:v", "v210",
+        cmd = ["ffmpeg", "-y"] + clean_aperture_input_args(clean_aperture) + ["-i", str(source_path),
+               "-movflags", "write_colr", "-c:v", "v210",
                "-color_primaries", "smpte170m", "-color_trc", "bt709", "-colorspace", "smpte170m",
                "-color_range", "mpeg", "-metadata:s:v:0", "encoder=Uncompressed 10-bit 4:2:2",
                "-vf", f"setfield={setfield},setsar={setsar},setdar=4/3",
@@ -928,7 +974,8 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
         return False, f"Validation error: {e}"
 
 def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
-                        process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool) -> bool:
+                        process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
+                        clean_aperture: bool = False) -> bool:
     """Encode source to FFV1 v3 in MKV with lossless framemd5 + audio hash validation.
 
     FFV1 parameters:
@@ -944,7 +991,8 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
     logger = logging.getLogger('video_transcoder')
     try:
         cmd = [
-            "ffmpeg", "-y", "-i", str(source_path),
+            "ffmpeg", "-y"] + clean_aperture_input_args(clean_aperture) + [
+            "-i", str(source_path),
             "-map", "0:v", "-map", "0:a",
             "-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", "16", "-slicecrc", "1",
             "-c:a", "copy",
@@ -980,10 +1028,15 @@ def strip_role_code(stem: str) -> str:
             return stem[:-3]
     return stem
 
-def process_single_video(source_path: Path, config: Config, completed_set: Set[str]) -> ProcessingResult:
+def process_single_video(source_path: Path, config: Config, completed_set: Set[str], colliding_stems: Set[str] = frozenset()) -> ProcessingResult:
     logger = logging.getLogger('video_transcoder')
     base_name, root_name = source_path.name, sanitize_filename(source_path.stem)
     base_stem = strip_role_code(root_name)
+    if base_stem in colliding_stems:
+        # Same unique ID with multiple role codes (e.g. _pm.mov + _sh.mp4) would
+        # otherwise collide on the same output filename — disambiguate with the
+        # source file's original extension.
+        base_stem = f"{base_stem}_{source_path.suffix.lstrip('.').lower()}"
     output_paths = {}
     if config.output_h264:
         output_paths['h264'] = config.output_dir / f"{base_stem}_sl.mp4"
@@ -1015,7 +1068,21 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
     try:
         info = get_video_info(source_path)
         audio_status = "Stereo" if info.has_audio else "No Audio"
-        
+
+        if info.is_vfr and (config.output_v210 or config.output_ffv1):
+            logger.warning(f"Variable frame rate detected in {base_name} — quarantining for review "
+                           f"(lossless roundtrip validation is unreliable on VFR sources)")
+            with open(process_log, 'w') as log_f:
+                log_f.write(SCRIPT_TITLE + "\n" + SCRIPT_NAME + "\n" + SCRIPT_SEPARATOR + "\n" + SCRIPT_SEPARATOR + "\n\n")
+                log_f.write(f"Processing: {base_name}\n")
+                log_f.write("QUARANTINED: variable frame rate detected in source video stream — "
+                            "transcode skipped, moved to QUARANTINE for investigation\n")
+            if not config.dry_run:
+                shutil.move(str(source_path), str(config.quarantine_dir / base_name))
+            return ProcessingResult(base_name, ProcessStatus.QUARANTINED, audio_status,
+                                    "Quarantined: variable frame rate detected in source",
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
         # Apply FPS override if specified (before video standard detection)
         if config.force_fps is not None:
             logger.info(f"FPS override: {info.fps:.3f} -> {config.force_fps:.3f}")
@@ -1050,7 +1117,8 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
             if video_standard == VideoStandard.UNKNOWN:
                 raise Exception("Cannot create v210 output: video is not NTSC or PAL standard")
             if not process_v210_output(source_path, output_paths['v210'], info, video_standard,
-                                       process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch):
+                                       process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch,
+                                       config.clean_aperture):
                 raise Exception("v210 encoding failed")
         if config.output_prores:
             logger.info(f"Encoding ProRes for {base_name}")
@@ -1059,7 +1127,8 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
         if config.output_ffv1:
             logger.info(f"Encoding FFV1/MKV for {base_name}")
             if not process_ffv1_output(source_path, output_paths['ffv1'], info,
-                                       process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch):
+                                       process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch,
+                                       config.clean_aperture):
                 raise Exception("FFV1 encoding failed")
         
         if config.move_finished and not config.dry_run:
@@ -1082,7 +1151,19 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
                         thumb_path.unlink()
                     except Exception:
                         pass
-        return ProcessingResult(base_name, ProcessStatus.ERROR, audio_status, str(e), datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if config.output_v210 or config.output_ffv1:
+            # Lossless transcode failed for any reason — quarantine the source
+            # so it's visually segregated from untried files for review.
+            if not config.dry_run:
+                try:
+                    if source_path.exists():
+                        shutil.move(str(source_path), str(config.quarantine_dir / base_name))
+                        logger.warning(f"Quarantined {base_name} for review after failure")
+                except Exception as move_err:
+                    logger.error(f"Failed to quarantine {base_name}: {move_err}")
+            return ProcessingResult(base_name, ProcessStatus.QUARANTINED, audio_status, str(e), timestamp)
+        return ProcessingResult(base_name, ProcessStatus.ERROR, audio_status, str(e), timestamp)
     finally:
         if config.output_h264:
             cleanup_temp_files(stats_log_prefix)
@@ -1115,16 +1196,23 @@ def print_file_list(files: List[Path], file_index_map: Dict[str, int] = None):
         print(f"{i:4}. {display_name:<50}  {size_str:>12}  {duration_str:>10}{status}")
     print("-" * 100 + f"\n{'TOTAL:':<56}  {format_file_size(total_size):>12}  {format_duration(total_duration):>10}\n" + "=" * 100 + "\n")
 
-def print_live_status(files: List[Path], session_completed: Set[str], stats: ProcessingStats):
-    status_lines = ["\n" + "=" * 70, f"STATUS UPDATE ({len(session_completed)}/{len(files)} completed)", "-" * 70]
+def print_live_status(files: List[Path], session_completed: Set[str], stats: ProcessingStats, session_quarantined: Set[str] = None):
+    session_quarantined = session_quarantined or set()
+    status_lines = ["\n" + "=" * 70, f"STATUS UPDATE ({len(session_completed) + len(session_quarantined)}/{len(files)} completed)", "-" * 70]
     for i, file_path in enumerate(files):
-        status_icon = f"{Colors.GREEN}✓{Colors.RESET}" if file_path.name in session_completed else "⋯"
+        if file_path.name in session_quarantined:
+            status_icon = f"{Colors.YELLOW}Q{Colors.RESET}"
+        elif file_path.name in session_completed:
+            status_icon = f"{Colors.GREEN}✓{Colors.RESET}"
+        else:
+            status_icon = "⋯"
         status_lines.append(f"{i+1:4}. {status_icon} {file_path.name}")
     status_lines.append("-" * 70)
     success_str = f"{Colors.GREEN}Success: {stats.success}{Colors.RESET}"
     skipped_str = f"{Colors.YELLOW}Skipped: {stats.skipped}{Colors.RESET}" if stats.skipped > 0 else f"Skipped: {stats.skipped}"
+    quarantined_str = f"{Colors.YELLOW}Quarantined: {stats.quarantined}{Colors.RESET}" if stats.quarantined > 0 else f"Quarantined: {stats.quarantined}"
     error_str = f"{Colors.RED}Errors: {stats.error}{Colors.RESET}" if stats.error > 0 else f"Errors: {stats.error}"
-    status_lines.append(f"{success_str} | {skipped_str} | {error_str}")
+    status_lines.append(f"{success_str} | {skipped_str} | {quarantined_str} | {error_str}")
     status_lines.append("=" * 70 + "\n")
     for line in status_lines:
         tqdm.write(line)
@@ -1135,16 +1223,26 @@ def print_summary(stats: ProcessingStats, start_time: datetime):
     print("\n" + "=" * 70 + f"\n{Colors.BOLD}PROCESSING SUMMARY{Colors.RESET}\n" + "=" * 70)
     print(f"Total files:      {stats.total}\n{Colors.GREEN}Successful:       {stats.success}{Colors.RESET}")
     skipped_line = f"{Colors.YELLOW}Skipped:          {stats.skipped}{Colors.RESET}" if stats.skipped > 0 else f"Skipped:          {stats.skipped}"
+    quarantined_line = f"{Colors.YELLOW}Quarantined:      {stats.quarantined}{Colors.RESET}" if stats.quarantined > 0 else f"Quarantined:      {stats.quarantined}"
     error_line = f"{Colors.RED}Errors:           {stats.error}{Colors.RESET}" if stats.error > 0 else f"Errors:           {stats.error}"
-    print(f"{skipped_line}\n{error_line}")
+    print(f"{skipped_line}\n{quarantined_line}\n{error_line}")
     print(f"Processing time:  {duration}\n" + "=" * 70)
+    if stats.quarantined_files:
+        print(f"\n{Colors.YELLOW}QUARANTINED FILES:{Colors.RESET}")
+        for quarantined in stats.quarantined_files:
+            print(f"  {Colors.YELLOW}Q{Colors.RESET} {quarantined}")
+        print()
     if stats.failed_files:
         print(f"\n{Colors.RED}FAILED FILES:{Colors.RESET}")
         for failed in stats.failed_files:
             print(f"  {Colors.RED}✗{Colors.RESET} {failed}")
         print()
     logger.info("=" * 70 + "\nPROCESSING SUMMARY\n" + "=" * 70)
-    logger.info(f"Total files:      {stats.total}\nSuccessful:       {stats.success}\nSkipped:          {stats.skipped}\nErrors:           {stats.error}\nProcessing time:  {duration}\n" + "=" * 70)
+    logger.info(f"Total files:      {stats.total}\nSuccessful:       {stats.success}\nSkipped:          {stats.skipped}\nQuarantined:      {stats.quarantined}\nErrors:           {stats.error}\nProcessing time:  {duration}\n" + "=" * 70)
+    if stats.quarantined_files:
+        logger.warning("QUARANTINED FILES:")
+        for quarantined in stats.quarantined_files:
+            logger.warning(f"  - {quarantined}")
     if stats.failed_files:
         logger.error("FAILED FILES:")
         for failed in stats.failed_files:
@@ -1155,6 +1253,15 @@ def print_summary(stats: ProcessingStats, start_time: datetime):
         logger.warning(f"JOB COMPLETED WITH ERRORS - {stats.success} succeeded, {stats.error} failed")
     else:
         logger.error("JOB FAILED - No files were successfully processed")
+
+def compute_colliding_stems(files: List[Path]) -> Set[str]:
+    """Find base_stems (post role-code-strip) shared by more than one distinct
+    source file — e.g. an _pm.mov and an _sh.mp4 for the same unique ID."""
+    stem_to_names: Dict[str, Set[str]] = {}
+    for f in files:
+        stem = strip_role_code(sanitize_filename(f.stem))
+        stem_to_names.setdefault(stem, set()).add(f.name)
+    return {stem for stem, names in stem_to_names.items() if len(names) > 1}
 
 def process_batch(config: Config) -> ProcessingStats:
     logger = logging.getLogger('video_transcoder')
@@ -1167,13 +1274,17 @@ def process_batch(config: Config) -> ProcessingStats:
     print_file_list(files)
     completed_set = get_completed_files(config.csv_log)
     logger.info(f"Found {len(completed_set)} previously completed files")
-    session_completed = set()
+    colliding_stems = compute_colliding_stems(files)
+    if colliding_stems:
+        logger.warning(f"Found {len(colliding_stems)} unique ID(s) with multiple role codes — "
+                       f"disambiguating output filenames with source extension")
+    session_completed, session_quarantined = set(), set()
     mode = "CLEANUP" if config.cleanup_only else "PROCESSING"
     print(f"--- Starting {mode} MODE ---\n")
-    
+
     if config.workers > 1 and not config.cleanup_only:
         with ProcessPoolExecutor(max_workers=config.workers) as executor:
-            futures = {executor.submit(process_single_video, f, config, completed_set): f for f in files}
+            futures = {executor.submit(process_single_video, f, config, completed_set, colliding_stems): f for f in files}
             with tqdm(total=len(files), unit="file", desc="Total Progress", position=0) as pbar:
                 for future in as_completed(futures):
                     result = future.result()
@@ -1184,17 +1295,21 @@ def process_batch(config: Config) -> ProcessingStats:
                     elif result.status == ProcessStatus.SKIPPED:
                         stats.skipped += 1
                         session_completed.add(result.source_file)
+                    elif result.status == ProcessStatus.QUARANTINED:
+                        stats.quarantined += 1
+                        stats.quarantined_files.append(f"{result.source_file}: {result.message}")
+                        session_quarantined.add(result.source_file)
                     else:
                         stats.error += 1
                         stats.failed_files.append(f"{result.source_file}: {result.message}")
                     pbar.set_postfix_str(f"✓ {len(session_completed)}/{len(files)} | ✗ {stats.error}")
                     pbar.update(1)
-                    if len(session_completed) % 1 == 0 or result.status == ProcessStatus.ERROR:
-                        print_live_status(files, session_completed, stats)
+                    if len(session_completed) % 1 == 0 or result.status in (ProcessStatus.ERROR, ProcessStatus.QUARANTINED):
+                        print_live_status(files, session_completed, stats, session_quarantined)
     else:
         with tqdm(total=len(files), unit="file", desc="Total Progress", position=0) as pbar:
             for file_path in files:
-                result = process_single_video(file_path, config, completed_set)
+                result = process_single_video(file_path, config, completed_set, colliding_stems)
                 log_to_csv(config.csv_log, result, config.dry_run)
                 if result.status == ProcessStatus.SUCCESS:
                     stats.success += 1
@@ -1202,12 +1317,16 @@ def process_batch(config: Config) -> ProcessingStats:
                 elif result.status == ProcessStatus.SKIPPED:
                     stats.skipped += 1
                     session_completed.add(result.source_file)
+                elif result.status == ProcessStatus.QUARANTINED:
+                    stats.quarantined += 1
+                    stats.quarantined_files.append(f"{result.source_file}: {result.message}")
+                    session_quarantined.add(result.source_file)
                 else:
                     stats.error += 1
                     stats.failed_files.append(f"{result.source_file}: {result.message}")
                 pbar.set_postfix_str(f"✓ {len(session_completed)}/{len(files)} | ✗ {stats.error}")
                 pbar.update(1)
-                print_live_status(files, session_completed, stats)
+                print_live_status(files, session_completed, stats, session_quarantined)
     print_summary(stats, start_time)
     return stats
 
@@ -1233,6 +1352,13 @@ def parse_arguments() -> argparse.Namespace:
                         help='Override scan type detection: progressive (skip deinterlace), tff (top field first), bff (bottom field first)')
     parser.add_argument('--force-fps', type=float, default=None,
                         help='Override detected frame rate (e.g. 29.97). Use when ffprobe misreads FPS from the container')
+    parser.add_argument('--force-anamorphic', action='store_true',
+                        help='Force 854x480 (16:9) scaling for SD sources mistagged as 4:3 despite being '
+                             'anamorphic squeezed footage. Overrides detected DAR for H.264 scaling/thumbnails.')
+    parser.add_argument('--clean-aperture', action='store_true',
+                        help='Honor QuickTime clean aperture (clap) atom cropping during v210/FFV1 transcodes '
+                             'instead of preserving the full coded frame. Default is off (coded dimensions, '
+                             'full sample data) — only enable if you specifically want display-cropped output.')
     parser.add_argument('--thumbs', type=int, default=None,
                         help='Number of thumbnails to generate (default: 4 at standard positions, override uses random positions)')
     parser.add_argument('-h264', action='store_true', help='Generate H.264 MP4 output with thumbnails (_sl.mp4)')
