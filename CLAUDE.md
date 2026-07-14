@@ -22,7 +22,7 @@ Three derivative types, each with a strict three-character suffix convention:
 
 ## Current state
 
-At **v1.4.0**.
+At **v1.4.1** — real-world testing after the 1.4.0 feature push found and fixed 4 bugs in that release (see Key Learnings): the AppleDouble false-positive, the VFR average-check blind spot, the same-extension filename collision overwrite, and `--force-anamorphic` being silently undone by ffmpeg's default SAR handling. Also added command logging (every ffmpeg/MediaConch command now written to the process log).
 
 ## Shipped in v1.4.0
 

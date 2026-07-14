@@ -2,7 +2,7 @@
 vdg.cli — core logic for the Video Derivative Generator.
 
 Stanford Media Preservation Lab
-Video Derivative Generator - v1.4
+Video Derivative Generator - v1.4.1
 July 2026
 """
 
@@ -29,7 +29,7 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 SCRIPT_TITLE = "Stanford Media Preservation Lab"
-SCRIPT_NAME = "Video Derivative Generator, v1.4, July 2026"
+SCRIPT_NAME = "Video Derivative Generator, v1.4.1, July 2026"
 SCRIPT_SEPARATOR = "----"
 
 def _supports_color() -> bool:
