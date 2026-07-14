@@ -35,6 +35,8 @@ At **v1.4.1** (pending next version bump) — real-world testing after the 1.4.0
 - Every ffmpeg/MediaConch command (encode, framemd5/streamhash hashing, policy check) is now logged verbatim to the process log for troubleshooting.
 - Warn when a source has clean-aperture crop metadata — via `Frame Cropping` side data (the signal that actually fires in practice on FFmpeg 8.1.2), plus a defensive `coded_width`/`width` comparison for other FFmpeg builds. See Key Learnings for why the side-data check matters more than the literal dimension comparison.
 - `--keep-failed` flag: retains v210/FFV1 output that fails lossless validation, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting it — useful for inspecting what actually went wrong.
+- FFV1 output's `VENDOR_ID` tag is now explicitly set to `Apple QuickTime` instead of silently carrying through the source's own per-stream `vendor_id` tag (observed as `KeyG` — a capture-chain leftover, not meaningful authorship info).
+- "AAC encoder: ..." is now only logged when `-h264` is requested — it was misleading on lossless-only (`-v210`/`-ffv1`) runs, where audio is PCM copy, not AAC.
 
 ## Queued for next release
 

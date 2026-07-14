@@ -1075,6 +1075,10 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
                     Apple Silicon and modern x86.
       -slicecrc 1   Embeds a CRC in every slice header for per-slice error detection.
       Audio is copied without re-encoding to preserve the original PCM stream exactly.
+      vendor_id is overridden to "Apple QuickTime" — without this, ffmpeg carries the
+      source's own per-stream vendor_id tag straight through (observed as "KeyG" on
+      this lab's QuickTime sources, a leftover from the original capture chain rather
+      than anything meaningful about authorship).
     """
     logger = logging.getLogger('video_transcoder')
     try:
@@ -1083,6 +1087,7 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
             "-i", str(source_path),
             "-map", "0:v", "-map", "0:a",
             "-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", "16", "-slicecrc", "1",
+            "-metadata:s:v:0", "vendor_id=Apple QuickTime",
             "-c:a", "copy",
             str(output_path)
         ]
@@ -1528,7 +1533,11 @@ def main():
         if not config.dry_run:
             check_disk_space(config.output_dir)
         logger.info("Starting video transcoding pipeline")
-        logger.info(f"AAC encoder: {config.aac_encoder}")
+        if config.output_h264:
+            # AAC is only relevant to the H.264 path (v210/FFV1 audio is PCM copy,
+            # not AAC-encoded) — logging it unconditionally is misleading on
+            # lossless-only runs.
+            logger.info(f"AAC encoder: {config.aac_encoder}")
         stats = process_batch(config)
         if stats.error > 0:
             sys.exit(1)
