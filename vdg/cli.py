@@ -365,7 +365,7 @@ def detect_variable_packet_durations(file_path: Path, timeout: int = 180) -> boo
     except Exception:
         return False
 
-def get_video_info(file_path: Path) -> VideoInfo:
+def get_video_info(file_path: Path, warn: bool = True) -> VideoInfo:
     cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', str(file_path)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -412,7 +412,7 @@ def get_video_info(file_path: Path) -> VideoInfo:
     height = int(v_stream.get('coded_height') or display_height)
 
     logger = logging.getLogger('video_transcoder')
-    if (width, height) != (display_width, display_height):
+    if warn and (width, height) != (display_width, display_height):
         logger.warning(f"{file_path.name}: coded dimensions {width}x{height} differ from "
                        f"reported display dimensions {display_width}x{display_height}")
 
@@ -421,7 +421,7 @@ def get_video_info(file_path: Path) -> VideoInfo:
     # Frame Cropping side-data entry. This is the signal that actually matters.
     crop_side_data = next((sd for sd in v_stream.get('side_data_list', [])
                            if sd.get('side_data_type') == 'Frame Cropping'), None)
-    if crop_side_data:
+    if warn and crop_side_data:
         logger.warning(
             f"{file_path.name}: clean aperture crop present in source "
             f"(top={crop_side_data.get('crop_top', 0)} bottom={crop_side_data.get('crop_bottom', 0)} "
@@ -1170,7 +1170,10 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
     audio_status = "Unknown"
     
     try:
-        info = get_video_info(source_path)
+        # warn=False: get_file_info_for_display() already probed this file and
+        # logged any dimension/clean-aperture warnings once during the initial
+        # file listing — avoid printing the same warning a second time here.
+        info = get_video_info(source_path, warn=False)
         audio_status = "Stereo" if info.has_audio else "No Audio"
 
         if config.output_v210 or config.output_ffv1:
