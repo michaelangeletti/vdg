@@ -739,10 +739,13 @@ def run_ffmpeg_with_progress(cmd: List[str], total_frames: int, description: str
 
 def generate_thumbnail(source_path: Path, output_path: Path, timestamp: float, scale_string: str, index: int, total: int, interlaced: bool, parity: int = -1, log_file: Optional[Path] = None) -> bool:
     # Only deinterlace thumbnails if source is interlaced
+    # setsar=1 forces square output pixels — without it, ffmpeg's scale filter
+    # recalculates SAR to preserve the *source's* DAR, silently undoing any
+    # intentional aspect-ratio change (e.g. --force-anamorphic).
     if interlaced:
-        vf_filter = f"bwdif=mode=0:parity={parity}:deint=all,scale={scale_string},format=rgb24"
+        vf_filter = f"bwdif=mode=0:parity={parity}:deint=all,scale={scale_string},setsar=1,format=rgb24"
     else:
-        vf_filter = f"scale={scale_string},format=rgb24"
+        vf_filter = f"scale={scale_string},setsar=1,format=rgb24"
     
     # Use libopenjpeg encoder rather than the native jpeg2000 encoder.
     # The native encoder maps to sYCC color space at 9-bit regardless of input format.
@@ -789,10 +792,10 @@ def process_h264_output(source_path: Path, output_path: Path, info: VideoInfo, c
                 parity = 1
             else:
                 parity = -1
-            vf_chain = f"bwdif=mode=0:parity={parity}:deint=all,scale={scale_string},format=yuv420p"
+            vf_chain = f"bwdif=mode=0:parity={parity}:deint=all,scale={scale_string},setsar=1,format=yuv420p"
         else:
             parity = -1
-            vf_chain = f"scale={scale_string},format=yuv420p"
+            vf_chain = f"scale={scale_string},setsar=1,format=yuv420p"
         
         audio_mapping, audio_filter_args, audio_description = build_audio_filter_and_mapping(config, info)
         with open(process_log, 'a') as log_f:
