@@ -40,6 +40,10 @@ At **v1.4.1** (pending next version bump) — real-world testing after the 1.4.0
 
 (none currently — all items from the original v1.4.0 roadmap are shipped)
 
+## Documentation TODO
+
+- Next time README.md/MANUAL.md are revised, add an explanation of clean aperture crop and how VDG handles it with respect to mathematically lossless transcoding: what a QuickTime `clap` atom / `Frame Cropping` side data is, why the default behavior (`apply_cropping=0`, full coded frame preserved) is required for true losslessness, what `--clean-aperture` does instead (honors the crop, produces display-cropped but non-standard-dimension output), and the dimension-mismatch warning that flags when a source has this metadata.
+
 ## Key learnings & principles
 
 - **Whole-file average frame rate (`avg_frame_rate` vs `r_frame_rate`) is too coarse to detect real-world VFR.** A production file was found with only a *local* dip to 14.985fps (a handful of held/duplicated frames out of 84,603 total) — the overall average still rounded to the nominal 29.970fps, so the average-based check missed it entirely and the file transcoded and validated as if it were clean. Fixed by also checking actual per-packet durations directly from the container index (`ffprobe -show_entries packet=duration_time`, no decode needed) — catches VFR regardless of how small a fraction of frames is affected. Both checks are kept (OR'd together); the packet-duration check is gated to only run when `-v210`/`-ffv1` is requested, since it's more expensive than the average check.
