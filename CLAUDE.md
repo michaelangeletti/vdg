@@ -22,7 +22,7 @@ Three derivative types, each with a strict three-character suffix convention:
 
 ## Current state
 
-At **v1.4.2**. This round of work (v1.4.0 → v1.4.2) is closed out — no fixes or features currently on the table. Future issues get filed in GitHub Issues and dealt with systematically later, rather than as an open-ended stream. Next session's focus is a full README.md/MANUAL.md rewrite covering everything shipped in this round (see Documentation TODO below — expand it beyond just the clean-aperture explanation to cover all of v1.4).
+At **v1.4.2**. This round of work (v1.4.0 → v1.4.2) is closed out — no fixes or features currently on the table. Future issues get filed in GitHub Issues and dealt with systematically later, rather than as an open-ended stream. README.md, MANUAL.md, INSTALL_MACOS.md, and INSTALL_UBUNTU.md were fully rewritten for v1.4.2 (2026-07-14) — all four output formats, clean aperture handling, the QUARANTINE workflow, VFR detection, filename disambiguation, MediaConch validation, and every current flag are now documented. Keep these in sync going forward as features land, rather than batching another catch-up rewrite.
 
 ## Shipped in v1.4.0 / v1.4.1 / v1.4.2
 
@@ -42,10 +42,6 @@ At **v1.4.2**. This round of work (v1.4.0 → v1.4.2) is closed out — no fixes
 ## Queued for next release
 
 (none currently — all items from the original v1.4.0 roadmap are shipped)
-
-## Documentation TODO
-
-- Next time README.md/MANUAL.md are revised, add an explanation of clean aperture crop and how VDG handles it with respect to mathematically lossless transcoding: what a QuickTime `clap` atom / `Frame Cropping` side data is, why the default behavior (`apply_cropping=0`, full coded frame preserved) is required for true losslessness, what `--clean-aperture` does instead (honors the crop, produces display-cropped but non-standard-dimension output), and the dimension-mismatch warning that flags when a source has this metadata.
 
 ## Key learnings & principles
 

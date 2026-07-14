@@ -1,7 +1,7 @@
 # Video Derivative Generator (vdg)
-## User Manual — v1.1
+## User Manual — v1.4.2
 **Stanford Media Preservation Lab**
-*May 2026*
+*July 2026*
 
 ---
 
@@ -11,29 +11,33 @@
 2. [Dependencies](#dependencies)
 3. [Intake Pipelines](#intake-pipelines)
 4. [Output Formats](#output-formats)
-5. [Scaling and Resolution Handling](#scaling-and-resolution-handling)
-6. [Directory Structure](#directory-structure)
-7. [Naming Conventions](#naming-conventions)
-8. [Command Reference](#command-reference)
-9. [Audio Configuration](#audio-configuration)
-10. [Override Flags](#override-flags)
-11. [Thumbnails](#thumbnails)
-12. [Validation and Logging](#validation-and-logging)
-13. [Usage Examples](#usage-examples)
-14. [Troubleshooting](#troubleshooting)
+5. [Clean Aperture Handling](#clean-aperture-handling)
+6. [Scaling and Resolution Handling](#scaling-and-resolution-handling)
+7. [Frame Rate Handling](#frame-rate-handling)
+8. [Quarantine Workflow](#quarantine-workflow)
+9. [Directory Structure](#directory-structure)
+10. [Naming Conventions](#naming-conventions)
+11. [Command Reference](#command-reference)
+12. [Audio Configuration](#audio-configuration)
+13. [Override Flags](#override-flags)
+14. [Thumbnails](#thumbnails)
+15. [Validation and Logging](#validation-and-logging)
+16. [Usage Examples](#usage-examples)
+17. [Troubleshooting](#troubleshooting)
+18. [Version History](#version-history)
 
 ---
 
 ## Overview
 
-`vdg` (Video Derivative Generator) is a batch video transcoding tool for the Stanford Media Preservation Lab. It processes video files from a source directory, generates one or more derivative formats, produces JPEG 2000 thumbnails alongside H.264 output, and moves completed source files to a finished archive folder. All operations are logged to a per-file process log and a cumulative CSV summary.
+`vdg` (Video Derivative Generator) is a batch video transcoding tool for the Stanford Media Preservation Lab. It processes video files from a source directory, generates one or more derivative formats, produces JPEG 2000 thumbnails alongside H.264 output, and moves completed source files to a finished archive folder. Sources that are detected as variable frame rate before encoding, or whose lossless output fails validation, are moved to a `QUARANTINE` folder instead of the finished archive, so review candidates never get silently mixed back in with untried or successfully-processed sources. All operations are logged to a per-file process log and a cumulative CSV summary.
 
 The script is designed around two distinct intake pipelines:
 
 - **Tape digitization** — FFV1/MKV preservation masters produced by the SMPL digitization workflow from analog formats (Betacam SP, Digital Betacam, VHS, U-matic, Hi8, DV)
 - **Acquired digital content** — born-digital HD deliverables from vendors and distributors
 
-At least one output format flag (`-h264`, `-v210`, `-prores`) must be specified on every invocation.
+Four output formats are available: `-h264`, `-v210`, `-prores`, `-ffv1`. At least one must be specified on every invocation; they may be combined freely (e.g. `-ffv1 -h264` to generate a preservation master and an access copy in the same pass).
 
 ---
 
@@ -41,14 +45,15 @@ At least one output format flag (`-h264`, `-v210`, `-prores`) must be specified 
 
 | Tool | Purpose |
 |------|---------|
-| `ffmpeg` | All encoding, filtering, and thumbnail generation |
+| `ffmpeg` | All encoding, filtering, hashing, and thumbnail generation |
 | `ffprobe` | Source file metadata detection |
-| Python 3 | Runtime |
+| Python 3.10+ | Runtime |
 | `tqdm` | Progress bar display |
+| `mediaconch` | *(Optional)* Policy conformance checks on `-v210`/`-ffv1` output |
 
-Both `ffmpeg` and `ffprobe` must be present in `PATH`. The script checks for them at startup and exits if either is missing.
+`ffmpeg` and `ffprobe` must be present in `PATH`. The script checks for them at startup and exits if either is missing. `mediaconch` is checked separately — if it's missing, `vdg` logs a warning and skips policy conformance checks for the run rather than exiting.
 
-**AAC encoder autodetection:** The script probes for AAC encoders at startup in priority order: `aac_at` (macOS AudioToolbox, preferred) → `libfdk_aac` → `aac` (FFmpeg native). The selected encoder is logged and used for all H.264 output in that session.
+**AAC encoder autodetection:** The script probes for AAC encoders at startup in priority order: `aac_at` (macOS AudioToolbox, preferred) → `libfdk_aac` → `aac` (FFmpeg native). The selected encoder is logged and used for all H.264 output in that session. This is only logged when `-h264` is requested — on lossless-only runs (`-v210`/`-ffv1`), audio is copied (PCM/native), not AAC-encoded, so logging an AAC encoder in that case would be misleading.
 
 ---
 
@@ -62,11 +67,11 @@ Supported source formats: Betacam SP, Digital Betacam, VHS, U-matic, Hi8, DV
 
 **DV note:** DV content is captured and packaged using dvrescue (MIPoPS). dvrescue-packaged DV-in-MKV files can present unreliable container metadata — in particular, ffprobe may misread the frame rate. Use `--force-fps 29.97` and `--force-scan bff` when processing standard NTSC DV sources from this workflow.
 
-**v210 and ProRes output are restricted to SD sources** (NTSC or PAL video standards). These formats are only applicable to the tape digitization pipeline. Attempting to generate v210 or ProRes from a source that does not resolve to NTSC or PAL will produce an error.
+**v210 output is restricted to SD sources** that resolve to a recognized NTSC or PAL video standard (see [Scaling and Resolution Handling](#scaling-and-resolution-handling)). Attempting to generate v210 from a source that doesn't resolve to NTSC or PAL raises an error before encoding starts. **`-prores` and `-ffv1` are not restricted by video standard** — both encode at the source's native dimensions with no scaling filter applied, so they run against SD or HD sources equally.
 
 ### Acquired Digital Content (HD)
 
-Born-digital deliverables from vendors, distributors, and licensing partners. These files may arrive as H.264 or H.265 in `.mov` or `.mp4` containers, or occasionally as other formats. This population is more variable in its technical attributes. The `-h264` output flag is the appropriate derivative for this pipeline.
+Born-digital deliverables from vendors, distributors, and licensing partners. These files may arrive as H.264 or H.265 in `.mov` or `.mp4` containers, or occasionally as other formats. This population is more variable in its technical attributes. The `-h264` output flag is the appropriate derivative for this pipeline; `-ffv1` is also commonly used here to produce a lossless preservation copy of an HD deliverable.
 
 ---
 
@@ -93,7 +98,7 @@ Output filename: `<base>_sl.mp4`
 
 ### v210 QuickTime (`-v210`)
 
-Uncompressed 10-bit 4:2:2 in a QuickTime container. **SD sources only.** A framemd5 lossless validation is performed after encoding, comparing the video stream of the output against the source frame by frame, and comparing audio stream hashes. The output file is deleted if validation fails.
+Uncompressed 10-bit 4:2:2 in a QuickTime container. **SD sources only** (see [Intake Pipelines](#intake-pipelines)). A framemd5 lossless validation is performed after encoding, comparing the video stream of the output against the source frame by frame, and comparing audio stream hashes — see [Validation and Logging](#validation-and-logging). If `mediaconch` is available, a policy conformance check also runs, currently defined for NTSC sources only. The output file is deleted (or retained with a `_VALIDATION_FAILED` suffix, with `--keep-failed`) if any of these checks fail, and the source is quarantined — see [Quarantine Workflow](#quarantine-workflow).
 
 Color metadata is set per standard:
 
@@ -108,15 +113,65 @@ Output filename: `<stem>.mov` (no role code change)
 
 ### ProRes 422 HQ QuickTime (`-prores`)
 
-Apple ProRes 422 HQ using the `prores_ks` encoder, profile 3, vendor tag `apl0`. Audio is copied from the source stream without re-encoding.
+Apple ProRes 422 HQ using the `prores_ks` encoder, profile 3, video tag `apch` (the ProRes 422 HQ fourCC), vendor tag `apl0`. No scaling filter is applied — output dimensions match the source exactly. Audio is copied from the source stream without re-encoding. No lossless validation or MediaConch check is performed for ProRes output.
 
 Output filename: `<base>_sh.mov`
+
+### FFV1 v3 Lossless MKV (`-ffv1`)
+
+Mathematically lossless intra-frame video in a Matroska container, intended as an alternative or supplement to a v210 preservation master. No scaling filter is applied — output dimensions match the source exactly (subject to [clean aperture handling](#clean-aperture-handling)).
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `-level 3` | FFV1 version 3 | Multithreading, per-slice CRCs; accepted by most digital preservation repositories |
+| `-g 1` | Keyframe every frame | Required for random access and error recovery in archival use |
+| `-slices 16` | 16-slice multithreading | Appropriate for Apple Silicon and modern x86 |
+| `-slicecrc 1` | Per-slice CRC | Embeds a CRC in every slice header for error detection |
+
+Audio is copied without re-encoding, preserving the original stream exactly.
+
+**`VENDOR_ID` tagging:** when the source is a genuine QuickTime file (identified by the `major_brand` container tag equal to `qt`, exposed internally as `VideoInfo.is_quicktime`), the output's `VENDOR_ID` is explicitly set to `Apple QuickTime`. Without this override, ffmpeg carries the source's own per-stream `vendor_id` tag straight through — on this lab's QuickTime sources that tag has been observed as `KeyG`, a capture-chain leftover rather than meaningful authorship metadata. For non-QuickTime sources (MXF, MPEG, etc.), the tag is left untouched, since "Apple QuickTime" would be actively wrong there.
+
+Like v210, FFV1 output undergoes framemd5 + audio streamhash validation and, if `mediaconch` is available, a MediaConch policy check (unconditional — unlike v210, the FFV1 policy is not gated to a specific video standard). Failure deletes or retains (`--keep-failed`) the output and quarantines the source.
+
+Output filename: `<base>_pm.mkv`
+
+---
+
+## Clean Aperture Handling
+
+Some QuickTime-family sources — in particular v210 masters produced by other tools, and some camera-native files — carry a *clean aperture*: metadata instructing players to display only a cropped subregion of the full coded frame. On this lab's FFmpeg builds (confirmed on 8.1.2), this is conveyed through a `Frame Cropping` side-data entry on the video stream (`crop_top`, `crop_bottom`, `crop_left`, `crop_right`), not through a coded/display dimension split — `coded_width`/`coded_height` and `width`/`height` were observed identical even on a confirmed clap-tagged file.
+
+This matters for `-v210` and `-ffv1`, which are meant to be mathematically lossless: if ffmpeg applied the clean-aperture crop during decode, the output would only contain the *display* pixels, discarding real captured data outside the clean aperture — a lossy operation with respect to the source's coded frame, even though the video codec itself is lossless.
+
+### Default: full coded frame preserved
+
+By default, `vdg` passes `-apply_cropping 0` to ffmpeg on the input side of every `-v210` and `-ffv1` encode. This disables automatic clean-aperture cropping, so the full coded frame is preserved in the output — the correct default for preservation masters, where nothing outside what was actually captured should be discarded.
+
+An earlier iteration of this logic used `-flags2 +ignorecrop`, which turned out to have **no effect** on clap-derived cropping (confirmed via MediaInfo: a source stayed cropped to 704×480 with or without it). That flag only suppresses codec-level SPS conformance-window cropping — a different mechanism from the container-derived clap crop. `-apply_cropping` is the flag that actually controls it.
+
+### `--clean-aperture`: honor the crop instead
+
+Pass `--clean-aperture` to do the opposite: omit `-apply_cropping 0` and let ffmpeg apply its native clap crop, producing display-cropped output at non-standard dimensions. For example, a 720×486 source with an 8/8/3/3 crop becomes 704×480. Only use this if you specifically want the display-cropped result rather than the full preservation frame — it is not the recommended setting for archival masters.
+
+### The dimension/crop warnings
+
+At file-list time, and once (not twice) during actual processing, `vdg` checks each source for two independent signals and logs a warning if either fires:
+
+1. **`coded_width`/`coded_height` vs. `width`/`height` divergence** — a defensive check for FFmpeg builds where ffprobe reports the coded (full) and display (cropped) dimensions differently. `vdg` always uses coded dimensions (falling back to display dimensions if coded ones aren't reported) for all downstream calculations — scaling, GOP, thumbnails.
+2. **A `Frame Cropping` side-data entry** on the video stream — the signal that reliably fires on this lab's FFmpeg 8.1.2 builds, including cases where check (1) above reports no divergence at all. The warning includes the actual crop values from the source.
+
+Both warnings are informational; they don't change encoding behavior on their own. They exist so a clean-aperture source doesn't get processed under the silent assumption that the full frame was captured when it wasn't specifically evaluated.
+
+### Verifying a run
+
+framemd5 validation alone cannot catch a clean-aperture mismatch — it only proves that the source-hash and output-hash commands agree with *each other*, not that either one matches the true, uncropped source. `vdg` always uses matching `--clean-aperture` handling between the source-hash command and the encode command specifically to avoid this blind spot. If you're debugging a custom workflow, verify actual pixel dimensions directly (`ffprobe` or MediaInfo on the output) rather than relying on a framemd5 PASS alone.
 
 ---
 
 ## Scaling and Resolution Handling
 
-The script resolves output scale based on source width, height, and DAR. The table below summarizes all handled cases.
+The script resolves output scale (for `-h264` and its thumbnails) based on source width, height, and DAR. `-prores` and `-ffv1` are not scaled — they always encode at native source dimensions. The table below summarizes all H.264 scaling cases.
 
 | Source dimensions | DAR | Output scale | Notes |
 |-------------------|-----|--------------|-------|
@@ -132,7 +187,46 @@ The script resolves output scale based on source width, height, and DAR. The tab
 | >1920 or >1080 | other | -2:720 | Width calculated to preserve AR |
 | All other | any | Source dimensions (mod-2 safe) | Passthrough with dimension rounding |
 
-Frame rate handling: sources with frame rates above the standard threshold for their standard (>30 fps for NTSC, >25 fps for PAL) are halved on output. This handles 50i/60i sources correctly.
+Every `scale=` operation in both the H.264 filter chain and the thumbnail filter chain is followed by `setsar=1`. Without this, ffmpeg's `scale` filter recalculates the output SAR to preserve the *source's original* DAR whenever only literal width/height are given — which silently reverts any intentional aspect-ratio override (see `--force-anamorphic` below) back to the source's original, uncorrected display ratio.
+
+### `--force-anamorphic`
+
+Some SD tape sources are digitized as 4:3 full-frame despite actually containing anamorphic squeezed 16:9 footage — the detected DAR in this case is unreliable. `--force-anamorphic` overrides scaling to 854×480 (16:9) for 720-wide SD sources (480, 486, or 576 lines) regardless of detected DAR. It affects H.264 scaling and thumbnails only; it has no effect on HD-resolution sources.
+
+```bash
+vdg --source-dir ... --output-dir ... --force-anamorphic -h264
+```
+
+---
+
+## Frame Rate Handling
+
+### Standard frame rate halving
+
+Sources with frame rates above the standard threshold for their standard (>30 fps for NTSC, >25 fps for PAL) are halved on H.264 output. This handles 50i/60i sources correctly.
+
+### Variable frame rate (VFR) detection
+
+`-v210` and `-ffv1` requests trigger an additional VFR check before encoding, because lossless roundtrip (framemd5) validation assumes constant frame timing and is unreliable against a genuinely VFR source. Two independent checks are combined — either one firing is sufficient to flag the source:
+
+1. **Average rate divergence** — ffprobe's per-stream `r_frame_rate` (nominal/guessed rate) compared against `avg_frame_rate` (total frames ÷ duration). A gap greater than 0.05 fps flags the source.
+2. **Per-packet duration check** — `ffprobe -show_entries packet=duration_time` against the actual container index, with no decode required. This catches VFR that the whole-file average misses entirely: a source can have a handful of held or duplicated frames scattered through tens of thousands of total frames and still average out to the nominal rate. This check only runs for `-v210`/`-ffv1` requests, since it's more expensive than the average check and irrelevant to lossy H.264/ProRes output.
+
+A source that trips either check is quarantined — moved to `QUARANTINE/` before any encoding is attempted — rather than transcoded and left to fail (or worse, silently pass) framemd5 validation. See [Quarantine Workflow](#quarantine-workflow).
+
+---
+
+## Quarantine Workflow
+
+Sources that cannot be reliably or losslessly processed are moved to `<output-dir>/QUARANTINE/` instead of `finished_sources/`, so they're visually segregated from both successfully processed files and files not yet attempted. A file is quarantined when:
+
+- It is requested for `-v210` or `-ffv1` output and is detected as **variable frame rate** before encoding starts (see [Frame Rate Handling](#frame-rate-handling)) — no encode is attempted in this case.
+- A `-v210` or `-ffv1` encode completes but **fails lossless validation** — framemd5 mismatch, audio streamhash mismatch, or MediaConch policy failure (see [Validation and Logging](#validation-and-logging)).
+- Any other exception occurs while `-v210` or `-ffv1` output was requested for that file (e.g. an ffmpeg crash mid-encode).
+
+`-h264`-only and `-prores`-only failures are logged as ordinary errors and left in place in the source directory — they are not moved, since there's no lossless-integrity concern driving the quarantine decision for those formats.
+
+Quarantined files are recorded with `Quarantined` status in `transcode_summary.csv`, and listed separately (marked `Q`) in the live status display and end-of-run summary. They are not automatically retried. Investigate the cause via the per-file process log, then either fix the underlying issue (or re-run with an override flag, e.g. `--force-fps`, if the cause was misdetected metadata rather than a genuine VFR/corruption problem) and move the file back into the source directory manually.
 
 ---
 
@@ -145,18 +239,25 @@ Frame rate handling: sources with frame rates above the standard threshold for t
 
 <output-dir>/
     source_file_sl.mp4          ← H.264 derivative
-    source_file_sl.mov          ← v210 derivative
+    source_file.mov             ← v210 derivative (no role code change)
     source_file_sh.mov          ← ProRes derivative
+    source_file_pm.mkv          ← FFV1 derivative
     source_file_thumb_1.jp2     ← thumbnails (alongside H.264 output)
     source_file_thumb_2.jp2
     ...
+    QUARANTINE/                 ← sources that failed the VFR check or lossless validation
+        source_file_pm.mkv
     transcode_summary.csv       ← cumulative run log
     process_logs/
-        source_file_pm_process.log   ← per-file detailed log
-        transcode_YYYYMMDD_HHMMSS.log ← session log
+        source_file_pm_process.log      ← per-file detailed log
+        transcode_YYYYMMDD_HHMMSS.log   ← session log
+        <stem>_source_video.framemd5    ← retained only with --keep-framemd5
+        <stem>_output_video.framemd5
+        policy_ffv1.xml                 ← retained only with --keep-mediaconch
+        policy_v210_ntsc.xml
 ```
 
-The `finished_sources` and `process_logs` directories are created automatically. Source files are moved to `finished_sources` on successful completion by default (see `--no-move-finished`).
+The `finished_sources`, `QUARANTINE`, and `process_logs` directories are created automatically. Source files are moved to `finished_sources` on successful completion by default (see `--no-move-finished`); files that fail a lossless format go to `QUARANTINE` instead (see [Quarantine Workflow](#quarantine-workflow)).
 
 ---
 
@@ -178,13 +279,22 @@ The script strips a recognized role code suffix (`_pm`, `_sh`, or `_sl`) from th
 
 **Examples:**
 
-| Source filename | H.264 output | ProRes output |
-|-----------------|-------------|---------------|
-| `abc123_pm.mkv` | `abc123_sl.mp4` | `abc123_sh.mov` |
-| `abc123_sh.mkv` | `abc123_sl.mp4` | `abc123_sh.mov` |
-| `vendor_delivery.mov` | `vendor_delivery_sl.mp4` | `vendor_delivery_sh.mov` |
+| Source filename | H.264 output | ProRes output | FFV1 output |
+|-----------------|-------------|---------------|-------------|
+| `abc123_pm.mkv` | `abc123_sl.mp4` | `abc123_sh.mov` | `abc123_pm.mkv` |
+| `abc123_sh.mkv` | `abc123_sl.mp4` | `abc123_sh.mov` | `abc123_pm.mkv` |
+| `vendor_delivery.mov` | `vendor_delivery_sl.mp4` | `vendor_delivery_sh.mov` | `vendor_delivery_pm.mkv` |
 
 **Spaces in filenames:** All spaces in source filename stems are replaced with underscores in every output filename. This is applied universally regardless of whether the source filename follows the role code convention.
+
+### Filename disambiguation
+
+If two or more source files share the same base ID after role-code stripping — e.g. `abc123_pm.mov` and `abc123_sh.mp4` delivered for the same item — their output filenames would otherwise collide (both producing `abc123_sl.mp4`, with the second job silently overwriting the first's H.264 output and thumbnails). `vdg` detects these groups automatically at the start of every run and disambiguates:
+
+1. **Extension alone**, if it's unique within the group: `abc123_pm.mov` → `abc123_mov_sl.mp4`; `abc123_sh.mp4` → `abc123_mp4_sl.mp4`.
+2. **Role code + extension**, if extension alone isn't unique across the group (e.g. two `.mov` files sharing an ID): `abc123_pm.mov` → `abc123_pm_mov_sl.mp4`; `abc123_sh.mov` → `abc123_sh_mov_sl.mp4`.
+
+A warning is logged at the start of a run reporting how many unique IDs were affected. After a run involving disambiguation, verify the actual output directory listing rather than relying solely on per-file `Success` statuses in the summary — a collision (before this feature, or in some not-yet-anticipated grouping) produces two individually "successful" jobs where the second overwrote the first, and a per-file status alone won't reveal that.
 
 ---
 
@@ -196,7 +306,14 @@ The script strips a recognized role code suffix (`_pm`, `_sh`, or `_sl`) from th
 |------|--------|
 | `-h264` | H.264 MP4 with JPEG 2000 thumbnails |
 | `-v210` | v210 uncompressed 10-bit 4:2:2 QuickTime (SD only) |
-| `-prores` | ProRes 422 HQ QuickTime (SD only) |
+| `-prores` | ProRes 422 HQ QuickTime (native resolution) |
+| `-ffv1` | FFV1 v3 lossless MKV (native resolution) |
+
+### General flags
+
+| Flag | Description |
+|------|-------------|
+| `--version` | Print the script name/version and exit |
 
 ### Directory flags
 
@@ -214,21 +331,33 @@ The script strips a recognized role code suffix (`_pm`, `_sh`, or `_sl`) from th
 | `--cleanup-only` | off | Delete temporary files only; skip all encoding |
 | `--move-finished` | on | Move source files to `finished_sources/` after successful processing |
 | `--no-move-finished` | — | Disable source file movement |
-| `--skip-validation` | off | Skip post-encode H.264 validation (faster but less safe) |
+| `--skip-validation` | off | Skip post-encode H.264 validation (faster but less safe). Does not affect v210/FFV1 lossless validation. |
 
-### Override flags
+### Validation and retention flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--keep-framemd5` | off | Retain framemd5 files in `process_logs/` after lossless validation instead of deleting them. Applies to `-v210` and `-ffv1`. A digest summary is always written to the process log regardless of this flag. |
+| `--keep-mediaconch` | off | Retain the MediaConch policy XML written to `process_logs/` after conformance checks instead of deleting it. |
+| `--keep-failed` | off | Retain `-v210`/`-ffv1` output that fails lossless validation, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting it. |
+
+### Override flags (quick reference)
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--force-scan [progressive\|tff\|bff]` | auto-detect | Override ffprobe scan type detection |
 | `--force-fps FLOAT` | auto-detect | Override ffprobe frame rate detection |
+| `--force-anamorphic` | off | Force 854×480 (16:9) scaling for SD sources mistagged as 4:3 |
+| `--clean-aperture` | off | Honor clean aperture crop during `-v210`/`-ffv1` transcodes instead of preserving the full coded frame |
 | `--thumbs N` | `4` | Override number of thumbnails generated |
+
+See [Override Flags](#override-flags), [Clean Aperture Handling](#clean-aperture-handling), and [Scaling and Resolution Handling](#scaling-and-resolution-handling) for details on each.
 
 ---
 
 ## Audio Configuration
 
-All audio options apply to H.264 output only. ProRes audio is copied from the source stream. v210 audio is encoded as PCM 24-bit.
+All audio options apply to H.264 output only. ProRes audio is copied from the source stream. v210 and FFV1 audio are copied/encoded as PCM, not AAC.
 
 ### `--audio-stream`
 
@@ -246,10 +375,19 @@ Controls channel routing. Default: `stereo`.
 | Mode | Behavior |
 |------|---------|
 | `stereo` | Pass the selected stream through as-is |
-| `mono-duplicate` | Take channel 0 of the selected stream and duplicate it to both L and R output channels |
+| `mono-duplicate` | Take the channel selected by `--audio-channel` from the selected stream and duplicate it to both L and R output channels |
 | `mono-merge` | Merge streams `0:a:0` and `0:a:1` (both channels summed and center-panned to L+R) |
 
 `mono-merge` overrides `--audio-stream` and always combines the first two audio streams. This is useful for DV sources where left and right channels are packaged as two separate mono streams.
+
+### `--audio-channel`
+
+Used with `--audio-mode mono-duplicate` to select which channel of the chosen stream to duplicate to both output channels. `0` = left (default), `1` = right. Has no effect with `stereo` or `mono-merge` modes.
+
+```bash
+--audio-mode mono-duplicate --audio-channel 0   # duplicate left channel (default)
+--audio-mode mono-duplicate --audio-channel 1   # duplicate right channel
+```
 
 ### `--audio-pan-center`
 
@@ -298,18 +436,24 @@ This flag is applied before video standard detection, so it correctly propagates
 
 Both `--force-fps` and `--force-scan` can be used together.
 
+### Other override flags
+
+- **`--force-anamorphic`** — see [Scaling and Resolution Handling](#scaling-and-resolution-handling).
+- **`--clean-aperture`** — see [Clean Aperture Handling](#clean-aperture-handling).
+- **`--keep-failed`** — see [Quarantine Workflow](#quarantine-workflow) and [Validation and Logging](#validation-and-logging).
+
 ---
 
 ## Thumbnails
 
-JPEG 2000 thumbnails (`.jp2`) are generated alongside every H.264 output. They are not generated for v210 or ProRes-only runs.
+JPEG 2000 thumbnails (`.jp2`) are generated alongside every H.264 output. They are not generated for v210-, ProRes-, or FFV1-only runs.
 
 - **Default:** 4 thumbnails at positions 10%, 40%, 60%, and 90% of the file's duration
 - **Override:** `--thumbs N` generates N thumbnails at randomly selected positions between 5% and 95% of duration
 
-Thumbnails are scaled to the same output resolution as the H.264 derivative. Interlaced sources are deinterlaced before thumbnail extraction using the same field order as the H.264 encode.
+Thumbnails are scaled to the same output resolution as the H.264 derivative (including `--force-anamorphic`, if passed). Interlaced sources are deinterlaced before thumbnail extraction using the same field order as the H.264 encode.
 
-**Technical specifications:** 8-bit RGB, JPEG 2000 compression, encoded via `libopenjpeg`.
+**Technical specifications:** 8-bit RGB, JPEG 2000 compression, encoded via `libopenjpeg` (chosen over the native `jpeg2000` encoder, which maps to 9-bit sYCC regardless of input format).
 
 **Naming:** `<base>_thumb_1.jp2`, `<base>_thumb_2.jp2`, etc.
 
@@ -327,26 +471,45 @@ After pass 2 completes, the output MP4 is decoded end-to-end using `ffmpeg -f nu
 
 After v210 encoding, a framemd5 comparison is performed:
 
-1. Frame hashes are generated for the source video stream
+1. Frame hashes are generated for the source video stream (using the same `--clean-aperture` handling as the encode, so a crop-handling divergence doesn't masquerade as a framemd5 mismatch)
 2. Frame hashes are generated for the output video stream
 3. Hashes are compared frame by frame
-4. Audio stream hashes (MD5) are generated and compared for source and output
+4. Audio stream hashes (streamhash, MD5) are generated and compared for source and output
 
-If any mismatch is detected, the output file is deleted and the job is marked as an error. Validation results are written to the per-file process log.
+If any mismatch is detected, the output is deleted (or retained with `--keep-failed`), the source is quarantined, and the job is marked as an error. A digest summary (frame count, video/audio pass status) is always written to the per-file process log, regardless of `--keep-framemd5`.
+
+### FFV1 lossless validation
+
+Identical framemd5 (video) + streamhash (audio) methodology to v210, described above.
+
+### MediaConch policy checks
+
+If `mediaconch` is installed and in `PATH`, `vdg` runs an embedded policy check against `-v210` and `-ffv1` output after lossless validation passes:
+
+| Format | Policy file | Scope | Checks |
+|--------|-------------|-------|--------|
+| FFV1 | `policy_ffv1.xml` | All video standards | Matroska container, FFV1 codec, GOP N=1 (intra), per-slice and container-level CRC error detection, audio is PCM or FLAC |
+| v210 | `policy_v210_ntsc.xml` | **NTSC only** — no PAL policy is currently defined | MPEG-4/QuickTime container, v210 codec, 720×486 @ 29.970fps, 4:2:2, 10-bit, interlaced BFF, BT.601 NTSC color, PCM 24-bit 48kHz audio |
+
+If `mediaconch` is not found, the check is skipped with a startup warning and treated as passing — it does not block otherwise-successful output. A policy failure after a passing framemd5 result still fails the job and quarantines the source. The policy XML is written to `process_logs/` for the duration of the check and deleted afterward unless `--keep-mediaconch` is passed.
+
+### Command logging
+
+Every ffmpeg and MediaConch command run for a file — encode passes, framemd5/streamhash hashing, policy checks — is logged verbatim to that file's process log, for troubleshooting.
 
 ### Log files
 
-**Per-file process log** (`process_logs/<stem>_process.log`): Records ffmpeg command output for all passes, audio configuration, interlacing status, and v210 validation results if applicable.
+**Per-file process log** (`process_logs/<stem>_process.log`): Records every ffmpeg/MediaConch command run for the file, audio configuration, interlacing status, and v210/FFV1 validation results if applicable.
 
 **Session log** (`process_logs/transcode_YYYYMMDD_HHMMSS.log`): Records all INFO and above events for the session.
 
-**CSV summary** (`transcode_summary.csv`): Appended on every run. Columns: Timestamp, Source File, Status, Audio, Details. Files already present in the CSV with a `Success` status are skipped on subsequent runs unless their output derivatives are missing.
+**CSV summary** (`transcode_summary.csv`): Appended on every run. Columns: Timestamp, Source File, Status, Audio, Details. `Status` may be `Success`, `Error`, `Skipped`, or `Quarantined`. Files already present in the CSV with a `Success` status are skipped on subsequent runs unless their output derivatives are missing.
 
 ### Skip logic
 
 A file is skipped (not re-processed) if both conditions are true:
 - The source filename appears in `transcode_summary.csv` with `Success` status from a previous run
-- All expected output files (derivatives + thumbnails) are present on disk
+- All expected output files (every requested derivative, plus thumbnails if `-h264` was requested) are present on disk
 
 If output files are missing despite a CSV entry, the file will be re-processed.
 
@@ -360,16 +523,22 @@ If output files are missing despite a CSV entry, the file will be re-processed.
 vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output -h264
 ```
 
+### FFV1 preservation master + H.264 access copy
+
+```bash
+vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output -ffv1 -h264
+```
+
 ### H.264 plus v210 for NTSC tape sources
 
 ```bash
 vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output -h264 -v210
 ```
 
-### All three output formats
+### All four output formats
 
 ```bash
-vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output -h264 -v210 -prores
+vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output -h264 -v210 -prores -ffv1
 ```
 
 ### DV source from dvrescue — override FPS and scan type
@@ -393,11 +562,11 @@ vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
     --audio-mode mono-merge --force-scan bff -h264
 ```
 
-### DV source with single mono channel — duplicate to L+R
+### DV source with single mono channel — duplicate right channel to L+R
 
 ```bash
 vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
-    --audio-mode mono-duplicate --audio-stream 0:a:0 --force-scan bff -h264
+    --audio-mode mono-duplicate --audio-channel 1 --force-scan bff -h264
 ```
 
 ### Select a specific audio stream
@@ -405,6 +574,27 @@ vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
 ```bash
 vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
     --audio-stream 0:a:1 -h264
+```
+
+### Anamorphic SD tape mistagged as 4:3
+
+```bash
+vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
+    --force-anamorphic -h264
+```
+
+### Honor clean aperture crop instead of preserving the full coded frame
+
+```bash
+vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
+    --clean-aperture -ffv1
+```
+
+### Retain failed lossless output for inspection
+
+```bash
+vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
+    --keep-failed --keep-framemd5 -ffv1
 ```
 
 ### Custom thumbnail count
@@ -441,11 +631,15 @@ vdg --source-dir /Volumes/disk/1/source --output-dir /Volumes/disk/1/output \
 
 ### "Cannot create v210 output: video is not NTSC or PAL standard"
 
-v210 output is restricted to SD sources that resolve to NTSC (720×480/486, 29.97 fps) or PAL (720×576, 25 fps). HD sources, non-standard frame rates, or non-standard dimensions will not qualify. If the source is a valid SD tape output but the error still occurs, check whether ffprobe is misreading the frame rate — use `--force-fps` to correct it.
+v210 output is restricted to SD sources that resolve to NTSC (720×480/486, 29.97 fps) or PAL (720×576, 25 fps). HD sources, non-standard frame rates, or non-standard dimensions will not qualify. If the source is a valid SD tape output but the error still occurs, check whether ffprobe is misreading the frame rate — use `--force-fps` to correct it. If you need a lossless derivative from an HD or non-standard source, use `-ffv1` instead — it has no video-standard restriction.
 
 ### "At least one output format must be specified"
 
-One of `-h264`, `-v210`, or `-prores` must be included in every invocation.
+One of `-h264`, `-v210`, `-prores`, or `-ffv1` must be included in every invocation.
+
+### A source file ended up in QUARANTINE
+
+Check the per-file process log in `process_logs/` for the reason. The three causes are: variable frame rate detected before encoding, a lossless validation failure (framemd5, streamhash, or MediaConch) after encoding, or another exception during a `-v210`/`-ffv1` run. See [Quarantine Workflow](#quarantine-workflow). Quarantined files are not retried automatically — after resolving the cause, move the file back into the source directory and re-run.
 
 ### DV source processes but frame rate / GOP is wrong
 
@@ -453,28 +647,76 @@ dvrescue-packaged DV-in-MKV files can report incorrect frame rates in container 
 
 ### Audio sounds wrong — only one channel has content
 
-If the source has two discrete mono audio streams (common in DV), the default `stereo` audio mode will pass stream `0:a:0` as the left channel and may result in silence on the right. Use `--audio-mode mono-merge` to combine both streams, or `--audio-mode mono-duplicate` to mirror a single channel to both sides.
+If the source has two discrete mono audio streams (common in DV), the default `stereo` audio mode will pass stream `0:a:0` as the left channel and may result in silence on the right. Use `--audio-mode mono-merge` to combine both streams, or `--audio-mode mono-duplicate` (with `--audio-channel` to pick which side) to mirror a single channel to both sides.
 
 ### H.264 file exists but job re-processes anyway
 
-The skip logic requires both a `Success` entry in the CSV *and* all output files present on disk. If any thumbnail is missing, the file will be re-processed from scratch. Check that all `_thumb_N.jp2` files are present in the output directory.
+The skip logic requires both a `Success` entry in the CSV *and* all output files present on disk. If any thumbnail (or any other requested derivative) is missing, the file will be re-processed from scratch. Check that all expected files are present in the output directory.
 
-### v210 lossless validation fails
+### v210 or FFV1 lossless validation fails
 
-Check the process log for the specific frame numbers where the mismatch occurred. Common causes: source file corruption, interrupted encoding run, or disk I/O errors during encoding. Re-run the job; if validation fails consistently on the same file, the source may be damaged.
+Check the process log for the specific frame numbers where the mismatch occurred, and for the MediaConch output if the framemd5 comparison passed but validation still failed. Common causes: source file corruption, interrupted encoding run, disk I/O errors during encoding, or (for MediaConch) a genuinely non-conformant source. Re-run the job; if validation fails consistently on the same file, use `--keep-failed` to retain the output for manual inspection rather than having it deleted each time.
+
+### "mediaconch not found in PATH — policy conformance checks will be skipped"
+
+MediaConch is optional; without it, `vdg` still runs framemd5/streamhash validation for `-v210`/`-ffv1` but skips the policy conformance step. See [INSTALL_MACOS.md](INSTALL_MACOS.md) or [INSTALL_UBUNTU.md](INSTALL_UBUNTU.md) for install instructions if you want policy checks enabled.
+
+### MediaConch policy check fails on a v210 PAL source
+
+There is currently no MediaConch policy defined for PAL v210 output — only NTSC. This is expected; the framemd5/streamhash lossless check still applies and is the authoritative pass/fail signal for PAL v210. A PAL source will not attempt a MediaConch check at all (logged as "skipped — no policy defined for this video standard"), so if you're seeing an actual MediaConch *failure* on a PAL source, double check `video_standard` detection in the process log — it may be misdetecting as NTSC.
+
+### Clean aperture crop warning appears, but I don't want it to change anything
+
+The warning is informational. By default `vdg` already preserves the full coded frame (`--clean-aperture` is off), so the warning simply confirms the source *has* clap metadata that `vdg` is deliberately ignoring. No action is needed unless you specifically want display-cropped output, in which case pass `--clean-aperture`. See [Clean Aperture Handling](#clean-aperture-handling).
+
+### Two files' outputs collided (one overwrote the other)
+
+This should no longer happen automatically — `vdg` disambiguates output filenames for source files that share a base ID with different role codes (see [Filename disambiguation](#filename-disambiguation)). If you still see a collision, it likely involves a naming pattern not covered by the current grouping logic (e.g. identical stem, role code, *and* extension — true duplicates); verify the actual output directory listing rather than the CSV summary to confirm which file was overwritten, and rename one of the sources before re-running.
+
+### FFV1 output's VENDOR_ID looks wrong (or isn't set)
+
+`VENDOR_ID` is only overridden to `Apple QuickTime` when the source is detected as a genuine QuickTime file (container `major_brand` tag `qt`). For non-QuickTime sources (MXF, MPEG, plain MP4, etc.), the tag is intentionally left untouched — setting it to "Apple QuickTime" would misrepresent the source's actual origin.
+
+### Output from a DVD-sourced MPEG-2 file is 352×480 instead of 640×480
+
+The source is likely half-D1 NTSC (352×480), a reduced horizontal resolution format used by direct-to-disc DVD recorders. These files use non-square pixels (SAR 20:11) with a 4:3 DAR, which should display at 640×480. The script handles this case explicitly and will scale to 640×480 to match standard NTSC derivative output (H.264 only — `-prores`/`-ffv1` preserve native dimensions regardless). If the output is coming out at the wrong resolution, confirm the DAR reported by ffprobe is `4:3` — if the container metadata is incorrect, the passthrough branch may have been triggered instead.
 
 ### Output file has no audio
 
 Confirm the source has an audio stream (`ffprobe <file>`). If the stream exists but uses a non-default stream index, use `--audio-stream 0:a:1` (or the appropriate index). If the source genuinely has no audio, `[No Audio]` will be logged and an audio-free output is expected behavior.
 
-### Output from a DVD-sourced MPEG-2 file is 352×480 instead of 640×480
-
-The source is likely half-D1 NTSC (352×480), a reduced horizontal resolution format used by direct-to-disc DVD recorders. These files use non-square pixels (SAR 20:11) with a 4:3 DAR, which should display at 640×480. The script handles this case explicitly and will scale to 640×480 to match standard NTSC derivative output. If the output is coming out at the wrong resolution, confirm the DAR reported by ffprobe is `4:3` — if the container metadata is incorrect, the passthrough branch may have been triggered instead.
-
 ### Low disk space warning at startup
 
-The script checks for a minimum of 10 GB free in the output directory before processing. This is a warning, not a hard stop, but running with insufficient space will cause encoding failures mid-job. Uncompressed v210 output in particular requires significant disk space — a 30-minute NTSC file produces approximately 50–60 GB.
+The script checks for a minimum of 10 GB free in the output directory before processing. This is a warning, not a hard stop, but running with insufficient space will cause encoding failures mid-job. Uncompressed v210 output in particular requires significant disk space — a 30-minute NTSC file produces approximately 50–60 GB. FFV1 is smaller than v210 (it's compressed, just losslessly) but still substantially larger than H.264 or ProRes.
 
 ---
 
-*Stanford Media Preservation Lab — Video Derivative Generator v1.1 — May 2026*
+## Version History
+
+### v1.4.2 — July 2026
+- FFV1 `VENDOR_ID` override is now gated on genuinely detected QuickTime sources (`major_brand` = `qt`) rather than being applied unconditionally.
+- Clean-aperture/dimension warnings are now logged once per file instead of twice (initial file-list scan and actual processing no longer both emit it).
+
+### v1.4.1 — July 2026
+- Added `--keep-failed` and the clean-aperture dimension/crop warning.
+- Fixed `--force-anamorphic` being silently undone by ffmpeg's default SAR recalculation (`setsar=1` added after every `scale=`).
+- Fixed silent output-overwrite when two source files with different role codes shared a filename extension (automatic filename disambiguation).
+- Fixed a VFR false-negative (added the per-packet duration check) and an AppleDouble sidecar (`._foo.mov`) false-positive during file discovery.
+
+### v1.4.0 — July 2026
+- Added `-ffv1` output validation/quarantine parity with v210, the `QUARANTINE` workflow, clean aperture crop handling (`--clean-aperture`, `-apply_cropping 0` default), `--force-anamorphic`, and automatic filename disambiguation.
+- Switched to `coded_width`/`coded_height` by default instead of display dimensions.
+- Every ffmpeg/MediaConch command is now logged verbatim to the process log.
+
+### v1.3.0
+- Added MediaConch policy conformance checks (FFV1 and v210-NTSC policies), `--keep-framemd5`, and a framemd5 digest summary in the process log.
+
+### v1.2.0
+- Added the `-ffv1` output format, `--version` flag, `--audio-channel` flag, and a terminal color fix for Ubuntu.
+
+### v1.1 — May 2026
+- Initial manual version: `-h264`, `-v210`, `-prores` output, audio configuration, override flags, thumbnails, H.264/v210 validation.
+
+---
+
+*Stanford Media Preservation Lab — Video Derivative Generator v1.4.2 — July 2026*

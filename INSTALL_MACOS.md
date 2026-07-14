@@ -44,8 +44,8 @@ brew install python@3.12
 ## 4. Clone the repository
 
 ```bash
-git clone https://github.com/michaelangeletti/smpl-vdg.git
-cd smpl-vdg
+git clone https://github.com/michaelangeletti/vdg.git
+cd vdg
 ```
 
 ---
@@ -72,6 +72,23 @@ Add the above line to your `~/.zshrc` to make it permanent.
 
 ```bash
 vdg --help
+vdg --version
+```
+
+---
+
+## 7. Install MediaConch (optional)
+
+MediaConch enables policy conformance checks on `-v210` and `-ffv1` output (Matroska/FFV1 structure, v210 NTSC technical profile). If it's not installed, `vdg` logs a warning at startup and skips the check — it does not fail the run.
+
+```bash
+brew install mediaconch
+```
+
+Verify:
+
+```bash
+mediaconch --version
 ```
 
 ---
@@ -81,7 +98,7 @@ vdg --help
 The `bin/vdg` script can also be run directly without installation, as long as the repository root is in your `PYTHONPATH`:
 
 ```bash
-export PYTHONPATH=/path/to/smpl-vdg
+export PYTHONPATH=/path/to/vdg
 python3 bin/vdg --help
 ```
 

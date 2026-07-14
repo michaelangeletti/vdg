@@ -53,8 +53,8 @@ sudo apt install -y python3-pip
 ## 4. Clone the repository
 
 ```bash
-git clone https://github.com/michaelangeletti/smpl-vdg.git
-cd smpl-vdg
+git clone https://github.com/michaelangeletti/vdg.git
+cd vdg
 ```
 
 ---
@@ -79,6 +79,28 @@ Add to `~/.bashrc` to make permanent.
 
 ```bash
 vdg --help
+vdg --version
+```
+
+---
+
+## 7. Install MediaConch (optional)
+
+MediaConch enables policy conformance checks on `-v210` and `-ffv1` output (Matroska/FFV1 structure, v210 NTSC technical profile). If it's not installed, `vdg` logs a warning at startup and skips the check — it does not fail the run. Ubuntu's default repos don't carry it; install it from the MediaArea repository:
+
+```bash
+wget https://mediaarea.net/repo/deb/repo-mediaarea_1.0-27_all.deb
+sudo dpkg -i repo-mediaarea_1.0-27_all.deb
+sudo apt update
+sudo apt install -y mediaconch
+```
+
+> If the `.deb` filename above 404s, MediaArea has published a newer repo package — check [mediaarea.net/en/Repos](https://mediaarea.net/en/Repos) for the current version number and substitute it above.
+
+Verify:
+
+```bash
+mediaconch --version
 ```
 
 ---
