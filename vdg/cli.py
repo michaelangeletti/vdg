@@ -208,6 +208,7 @@ class Config:
         self.keep_mediaconch = args.keep_mediaconch
         self.clean_aperture = args.clean_aperture
         self.force_anamorphic = args.force_anamorphic
+        self.keep_failed = args.keep_failed
         self.aac_encoder = detect_aac_encoder()
 
         if not (self.output_h264 or self.output_v210 or self.output_prores or self.output_ffv1):
@@ -404,8 +405,28 @@ def get_video_info(file_path: Path) -> VideoInfo:
     # macOS FFmpeg 7.x+ honors QuickTime clap clean aperture atoms and reports
     # cropped display dimensions here, which understates the true frame size
     # for lossless preservation encoding.
-    width = int(v_stream.get('coded_width') or v_stream['width'])
-    height = int(v_stream.get('coded_height') or v_stream['height'])
+    display_width = int(v_stream.get('width', 0))
+    display_height = int(v_stream.get('height', 0))
+    width = int(v_stream.get('coded_width') or display_width)
+    height = int(v_stream.get('coded_height') or display_height)
+
+    logger = logging.getLogger('video_transcoder')
+    if (width, height) != (display_width, display_height):
+        logger.warning(f"{file_path.name}: coded dimensions {width}x{height} differ from "
+                       f"reported display dimensions {display_width}x{display_height}")
+
+    # Observed in practice (FFmpeg 8.1.2): clap crop doesn't show up as a
+    # coded_width/width divergence at all — it's conveyed only through this
+    # Frame Cropping side-data entry. This is the signal that actually matters.
+    crop_side_data = next((sd for sd in v_stream.get('side_data_list', [])
+                           if sd.get('side_data_type') == 'Frame Cropping'), None)
+    if crop_side_data:
+        logger.warning(
+            f"{file_path.name}: clean aperture crop present in source "
+            f"(top={crop_side_data.get('crop_top', 0)} bottom={crop_side_data.get('crop_bottom', 0)} "
+            f"left={crop_side_data.get('crop_left', 0)} right={crop_side_data.get('crop_right', 0)}) — "
+            f"default preserves the full coded frame; pass --clean-aperture to honor the crop instead"
+        )
 
     return VideoInfo(
         width=width, height=height, duration=duration,
@@ -863,9 +884,28 @@ def clean_aperture_input_args(clean_aperture: bool) -> List[str]:
     """
     return [] if clean_aperture else ["-apply_cropping", "0"]
 
+def handle_failed_lossless_output(output_path: Path, keep_failed: bool) -> None:
+    """On lossless validation failure, either delete the output or rename it
+    with a _VALIDATION_FAILED suffix for inspection, per --keep-failed."""
+    logger = logging.getLogger('video_transcoder')
+    if not output_path.exists():
+        return
+    if keep_failed:
+        failed_path = output_path.with_name(f"{output_path.stem}_VALIDATION_FAILED{output_path.suffix}")
+        try:
+            output_path.rename(failed_path)
+            logger.warning(f"Retained failed output as {failed_path.name} (--keep-failed)")
+        except Exception as e:
+            logger.error(f"Failed to rename failed output {output_path.name}: {e}")
+    else:
+        try:
+            output_path.unlink()
+        except Exception:
+            pass
+
 def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, video_standard: VideoStandard,
                         process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
-                        clean_aperture: bool = False) -> bool:
+                        clean_aperture: bool = False, keep_failed: bool = False) -> bool:
     logger = logging.getLogger('video_transcoder')
     try:
         setfield = "bff" if video_standard == VideoStandard.NTSC else "tff"
@@ -885,8 +925,7 @@ def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, v
             keep_framemd5, keep_mediaconch, video_standard, clean_aperture)
         if not is_valid:
             logger.error(f"v210 lossless validation FAILED: {validation_msg}")
-            if output_path.exists():
-                output_path.unlink()
+            handle_failed_lossless_output(output_path, keep_failed)
             return False
         return True
     except Exception as e:
@@ -1024,7 +1063,7 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
 
 def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
                         process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
-                        clean_aperture: bool = False) -> bool:
+                        clean_aperture: bool = False, keep_failed: bool = False) -> bool:
     """Encode source to FFV1 v3 in MKV with lossless framemd5 + audio hash validation.
 
     FFV1 parameters:
@@ -1055,8 +1094,7 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
             source_path, output_path, process_log, log_dir, keep_framemd5, keep_mediaconch, clean_aperture)
         if not is_valid:
             logger.error(f"FFV1 lossless validation FAILED: {validation_msg}")
-            if output_path.exists():
-                output_path.unlink()
+            handle_failed_lossless_output(output_path, keep_failed)
             return False
         return True
     except Exception as e:
@@ -1175,7 +1213,7 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
                 raise Exception("Cannot create v210 output: video is not NTSC or PAL standard")
             if not process_v210_output(source_path, output_paths['v210'], info, video_standard,
                                        process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch,
-                                       config.clean_aperture):
+                                       config.clean_aperture, config.keep_failed):
                 raise Exception("v210 encoding failed")
         if config.output_prores:
             logger.info(f"Encoding ProRes for {base_name}")
@@ -1185,7 +1223,7 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
             logger.info(f"Encoding FFV1/MKV for {base_name}")
             if not process_ffv1_output(source_path, output_paths['ffv1'], info,
                                        process_log, config.log_dir, config.keep_framemd5, config.keep_mediaconch,
-                                       config.clean_aperture):
+                                       config.clean_aperture, config.keep_failed):
                 raise Exception("FFV1 encoding failed")
         
         if config.move_finished and not config.dry_run:
@@ -1451,6 +1489,10 @@ def parse_arguments() -> argparse.Namespace:
                         help='Honor QuickTime clean aperture (clap) atom cropping during v210/FFV1 transcodes '
                              'instead of preserving the full coded frame. Default is off (coded dimensions, '
                              'full sample data) — only enable if you specifically want display-cropped output.')
+    parser.add_argument('--keep-failed', action='store_true',
+                        help='Retain v210/FFV1 output files that fail lossless validation (framemd5/streamhash/'
+                             'MediaConch) instead of deleting them, renamed with a _VALIDATION_FAILED suffix for '
+                             'inspection. Default is to delete failed output.')
     parser.add_argument('--thumbs', type=int, default=None,
                         help='Number of thumbnails to generate (default: 4 at standard positions, override uses random positions)')
     parser.add_argument('-h264', action='store_true', help='Generate H.264 MP4 output with thumbnails (_sl.mp4)')

@@ -22,9 +22,9 @@ Three derivative types, each with a strict three-character suffix convention:
 
 ## Current state
 
-At **v1.4.1** — real-world testing after the 1.4.0 feature push found and fixed 4 bugs in that release (see Key Learnings): the AppleDouble false-positive, the VFR average-check blind spot, the same-extension filename collision overwrite, and `--force-anamorphic` being silently undone by ffmpeg's default SAR handling. Also added command logging (every ffmpeg/MediaConch command now written to the process log).
+At **v1.4.1** (pending next version bump) — real-world testing after the 1.4.0 feature push found and fixed 4 bugs in that release (see Key Learnings): the AppleDouble false-positive, the VFR average-check blind spot, the same-extension filename collision overwrite, and `--force-anamorphic` being silently undone by ffmpeg's default SAR handling. Also added command logging and, most recently, the clean-aperture dimension warning + `--keep-failed` — the last two items from the original v1.4.0 roadmap are now done too (see below).
 
-## Shipped in v1.4.0
+## Shipped in v1.4.0 / v1.4.1
 
 - `coded_width`/`coded_height` now used by default in `VideoInfo` instead of `width`/`height`.
 - `--clean-aperture` flag: default disables automatic clean-aperture cropping via `-apply_cropping 0` (see Key Learnings); passing the flag lets ffmpeg apply its native clap crop instead. Verified against a real clap-tagged v210 source (macOS, FFmpeg 8.1.2) — MediaInfo confirmed 720x486 preserved by default, 704x480 with `--clean-aperture`.
@@ -33,11 +33,12 @@ At **v1.4.1** — real-world testing after the 1.4.0 feature push found and fixe
 - `--force-anamorphic` flag: forces 854×480 scaling for SD sources mistagged as 4:3 despite being anamorphic squeezed footage. Required a `setsar=1` fix to actually take effect — see Key Learnings.
 - Filename disambiguation when the same unique ID has multiple role codes (e.g. `_pm.mov` + `_sh.mp4`) — previously these collided on the same output filename; now the source extension is appended (`_mov_sl.mp4` / `_mp4_sl.mp4`). Extension alone isn't always enough — see Key Learnings.
 - Every ffmpeg/MediaConch command (encode, framemd5/streamhash hashing, policy check) is now logged verbatim to the process log for troubleshooting.
+- Warn when a source has clean-aperture crop metadata — via `Frame Cropping` side data (the signal that actually fires in practice on FFmpeg 8.1.2), plus a defensive `coded_width`/`width` comparison for other FFmpeg builds. See Key Learnings for why the side-data check matters more than the literal dimension comparison.
+- `--keep-failed` flag: retains v210/FFV1 output that fails lossless validation, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting it — useful for inspecting what actually went wrong.
 
 ## Queued for next release
 
-- Log a warning when coded and display dimensions differ.
-- Add `--keep-failed` flag to retain validation-failed output files, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting them.
+(none currently — all items from the original v1.4.0 roadmap are shipped)
 
 ## Key learnings & principles
 
@@ -45,6 +46,7 @@ At **v1.4.1** — real-world testing after the 1.4.0 feature push found and fixe
 - **AppleDouble sidecar files (`._filename`) get created automatically by macOS on non-native filesystems** (exFAT/NTFS external drives) and match `VIDEO_EXTENSIONS` by extension alone. `collect_video_files()` now skips any filename starting with `.` during discovery — without this, a `._foo.mov` sidecar gets treated as a real source, fails ffprobe, and gets quarantined instead of (or in addition to) the actual file needing review.
 - **Filename disambiguation by extension alone isn't always unique.** A real test case had `bm994hd4640_pm.mov` + `bm994hd4640_sh.mov` + `bm994hd4640_sl.mp4` sharing one ID — two of the three shared the `.mov` extension, so both resolved to the same disambiguated stem and the second silently overwrote the first's H.264 output and thumbnails. `compute_filename_disambiguation()` now tries extension alone first, and falls back to `role_code + extension` for the whole ID group if extension alone isn't unique across it. Always verify disambiguation fixes by listing the actual output directory, not just the run summary — a per-file "Success" doesn't reveal a same-batch overwrite.
 - **`scale=WxH` alone doesn't change display aspect ratio — it silently gets reverted.** FFmpeg's `scale` filter, when given only literal width/height with no explicit `sar`, recalculates the output SAR to *preserve the source's original DAR*. So `--force-anamorphic`'s `scale=854:480` produced 854x480 pixels but FFmpeg re-tagged it with a narrow SAR that forced playback right back to the source's (wrong) 4:3 — completely negating the override. This was invisible in the two pre-existing (non-forced) scaling cases only because their target dimensions were already chosen to be DAR-correct as square pixels. Fixed by adding `setsar=1` after every `scale=` in both the H.264 encode filter chain and the thumbnail filter chain — confirmed via `ffprobe -show_entries stream=...,sample_aspect_ratio,display_aspect_ratio` on both the forced and normal paths.
+- **On FFmpeg 8.1.2, `coded_width`/`coded_height` never actually differ from `width`/`height`, even on a confirmed clap-tagged file.** `bm994hd4640_pm.mov` has a real `Frame Cropping: 8/8/3/3` side-data entry, but ffprobe reported `width=720`/`coded_width=720` — identical. The clap crop is conveyed *only* through the `Frame Cropping` side-data block (`side_data_type`, `crop_top`/`crop_bottom`/`crop_left`/`crop_right` — field names confirmed against FFmpeg's own `fftools/ffprobe.c` source), not through a coded/display dimension split. The queued "warn when coded and display dimensions differ" item is kept as a defensive check for other FFmpeg builds, but the side-data check is the one that actually fires in this lab's environment.
 - **FFmpeg version divergence between macOS and Ubuntu is a recurring source of bugs**, particularly around `clap` atom handling and container behavior. Always consider both platforms when touching video probing/encoding code.
 - **framemd5 for video, streamhash for audio.** Audio framemd5 validation fails due to container re-packetization differences between MKV and MOV; streamhash is correct for lossless audio validation.
 - **`coded_width`/`coded_height` vs. `width`/`height`.** On FFmpeg 8.1.2 (macOS), ffprobe's `width`/`height` were observed equal to `coded_width`/`coded_height` for a clap-tagged v210 source — the crop instead showed up as stream-level `Side data: Frame Cropping` (crop_top/bottom/left/right). Using coded dimensions is still correct/harmless, but the real crop mechanism at transcode time is separate — see next point.

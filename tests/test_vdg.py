@@ -18,6 +18,7 @@ from vdg.cli import (
     compute_filename_disambiguation,
     clean_aperture_input_args,
     collect_video_files,
+    handle_failed_lossless_output,
     VideoStandard,
     ROLE_CODES,
 )
@@ -305,3 +306,28 @@ class TestCollectVideoFiles:
         (finished / "already_done_pm.mov").touch()
         files = collect_video_files(tmp_path, finished)
         assert [f.name for f in files] == ["real_pm.mov"]
+
+
+# ---------------------------------------------------------------------------
+# handle_failed_lossless_output — --keep-failed behavior
+# ---------------------------------------------------------------------------
+
+class TestHandleFailedLosslessOutput:
+    def test_deletes_by_default(self, tmp_path):
+        output_path = tmp_path / "failed_pm.mkv"
+        output_path.touch()
+        handle_failed_lossless_output(output_path, keep_failed=False)
+        assert not output_path.exists()
+
+    def test_keep_failed_renames_with_suffix(self, tmp_path):
+        output_path = tmp_path / "failed_pm.mkv"
+        output_path.touch()
+        handle_failed_lossless_output(output_path, keep_failed=True)
+        assert not output_path.exists()
+        assert (tmp_path / "failed_pm_VALIDATION_FAILED.mkv").exists()
+
+    def test_missing_output_is_a_no_op(self, tmp_path):
+        output_path = tmp_path / "does_not_exist_pm.mkv"
+        # Should not raise even though the file was never created.
+        handle_failed_lossless_output(output_path, keep_failed=True)
+        handle_failed_lossless_output(output_path, keep_failed=False)
