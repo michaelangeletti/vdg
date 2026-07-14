@@ -22,19 +22,20 @@ Three derivative types, each with a strict three-character suffix convention:
 
 ## Current state
 
-At **v1.3.0**, with **v1.4.0** planned as an end-of-month update.
+At **v1.4.0**.
 
-## Queued for v1.4.0
+## Shipped in v1.4.0
 
-Shipped (untested on Ubuntu/other clap-free sources yet, but macOS-verified — see below):
 - `coded_width`/`coded_height` now used by default in `VideoInfo` instead of `width`/`height`.
-- `--clean-aperture` flag: default disables automatic clean-aperture cropping via `-apply_cropping 0` (see Key Learnings); passing the flag lets ffmpeg apply its native clap crop instead.
+- `--clean-aperture` flag: default disables automatic clean-aperture cropping via `-apply_cropping 0` (see Key Learnings); passing the flag lets ffmpeg apply its native clap crop instead. Verified against a real clap-tagged v210 source (macOS, FFmpeg 8.1.2) — MediaInfo confirmed 720x486 preserved by default, 704x480 with `--clean-aperture`.
 - VFR source detection (`r_frame_rate` vs `avg_frame_rate` divergence) — quarantines the source and skips the transcode instead of producing a corrupt lossless roundtrip.
 - Any v210/FFV1 failure (not just VFR) now moves the source into a `QUARANTINE` folder under `output_dir` for review, instead of leaving it mixed in with untried files.
 - `--force-anamorphic` flag: forces 854×480 scaling for SD sources mistagged as 4:3 despite being anamorphic squeezed footage.
 - Filename disambiguation when the same unique ID has multiple role codes (e.g. `_pm.mov` + `_sh.mp4`) — previously these collided on the same output filename; now the source extension is appended (`_mov_sl.mp4` / `_mp4_sl.mp4`).
+- Every ffmpeg/MediaConch command (encode, framemd5/streamhash hashing, policy check) is now logged verbatim to the process log for troubleshooting.
 
-Still open:
+## Queued for next release
+
 - Log a warning when coded and display dimensions differ.
 - Add `--keep-failed` flag to retain validation-failed output files, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting them.
 
