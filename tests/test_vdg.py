@@ -17,6 +17,7 @@ from vdg.cli import (
     get_bitrate_config,
     compute_colliding_stems,
     clean_aperture_input_args,
+    collect_video_files,
     VideoStandard,
     ROLE_CODES,
 )
@@ -256,3 +257,29 @@ class TestCleanApertureInputArgs:
 
     def test_clean_aperture_true_omits_flag(self):
         assert clean_aperture_input_args(True) == []
+
+
+# ---------------------------------------------------------------------------
+# collect_video_files — hidden-file / AppleDouble filtering
+# ---------------------------------------------------------------------------
+
+class TestCollectVideoFiles:
+    def test_excludes_appledouble_sidecar(self, tmp_path):
+        (tmp_path / "real_pm.mov").touch()
+        (tmp_path / "._real_pm.mov").touch()
+        files = collect_video_files(tmp_path, tmp_path / "finished_sources")
+        assert [f.name for f in files] == ["real_pm.mov"]
+
+    def test_excludes_other_hidden_files(self, tmp_path):
+        (tmp_path / "real_pm.mov").touch()
+        (tmp_path / ".DS_Store").touch()
+        files = collect_video_files(tmp_path, tmp_path / "finished_sources")
+        assert [f.name for f in files] == ["real_pm.mov"]
+
+    def test_excludes_finished_dir_contents(self, tmp_path):
+        finished = tmp_path / "finished_sources"
+        finished.mkdir()
+        (tmp_path / "real_pm.mov").touch()
+        (finished / "already_done_pm.mov").touch()
+        files = collect_video_files(tmp_path, finished)
+        assert [f.name for f in files] == ["real_pm.mov"]

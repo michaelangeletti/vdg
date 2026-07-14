@@ -345,6 +345,24 @@ def _parse_frame_rate(rate_str: str) -> float:
     except Exception:
         return 0.0
 
+def detect_variable_packet_durations(file_path: Path, timeout: int = 180) -> bool:
+    """Inspect actual per-packet durations directly from the container index
+    (no decode needed) to catch VFR that a whole-file average frame rate
+    misses — e.g. a small number of held/duplicated frames scattered through
+    a file whose overall average still rounds to the nominal rate. Fails
+    open (returns False) if the probe itself can't run; the coarser
+    avg_frame_rate/r_frame_rate check in get_video_info is the fallback
+    signal in that case.
+    """
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+           '-show_entries', 'packet=duration_time', '-of', 'csv=p=0', str(file_path)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        durations = {round(float(line), 3) for line in result.stdout.splitlines() if line.strip()}
+        return len(durations) > 1
+    except Exception:
+        return False
+
 def get_video_info(file_path: Path) -> VideoInfo:
     cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', str(file_path)]
     try:
@@ -1097,19 +1115,25 @@ def process_single_video(source_path: Path, config: Config, completed_set: Set[s
         info = get_video_info(source_path)
         audio_status = "Stereo" if info.has_audio else "No Audio"
 
-        if info.is_vfr and (config.output_v210 or config.output_ffv1):
-            logger.warning(f"Variable frame rate detected in {base_name} — quarantining for review "
-                           f"(lossless roundtrip validation is unreliable on VFR sources)")
-            with open(process_log, 'w') as log_f:
-                log_f.write(SCRIPT_TITLE + "\n" + SCRIPT_NAME + "\n" + SCRIPT_SEPARATOR + "\n" + SCRIPT_SEPARATOR + "\n\n")
-                log_f.write(f"Processing: {base_name}\n")
-                log_f.write("QUARANTINED: variable frame rate detected in source video stream — "
-                            "transcode skipped, moved to QUARANTINE for investigation\n")
-            if not config.dry_run:
-                shutil.move(str(source_path), str(config.quarantine_dir / base_name))
-            return ProcessingResult(base_name, ProcessStatus.QUARANTINED, audio_status,
-                                    "Quarantined: variable frame rate detected in source",
-                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if config.output_v210 or config.output_ffv1:
+            # The whole-file average check (info.is_vfr) catches gross rate
+            # divergence; the packet-duration check catches a handful of
+            # held/duplicated frames scattered through an otherwise ~CFR-average
+            # file, which the average alone can miss.
+            vfr_detected = info.is_vfr or detect_variable_packet_durations(source_path)
+            if vfr_detected:
+                logger.warning(f"Variable frame rate detected in {base_name} — quarantining for review "
+                               f"(lossless roundtrip validation is unreliable on VFR sources)")
+                with open(process_log, 'w') as log_f:
+                    log_f.write(SCRIPT_TITLE + "\n" + SCRIPT_NAME + "\n" + SCRIPT_SEPARATOR + "\n" + SCRIPT_SEPARATOR + "\n\n")
+                    log_f.write(f"Processing: {base_name}\n")
+                    log_f.write("QUARANTINED: variable frame rate detected in source video stream — "
+                                "transcode skipped, moved to QUARANTINE for investigation\n")
+                if not config.dry_run:
+                    shutil.move(str(source_path), str(config.quarantine_dir / base_name))
+                return ProcessingResult(base_name, ProcessStatus.QUARANTINED, audio_status,
+                                        "Quarantined: variable frame rate detected in source",
+                                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
         # Apply FPS override if specified (before video standard detection)
         if config.force_fps is not None:
@@ -1203,6 +1227,11 @@ def collect_video_files(source_dir: Path, finished_dir: Path) -> List[Path]:
         if root_path.resolve() == finished_dir.resolve():
             continue
         for filename in filenames:
+            if filename.startswith('.'):
+                # Skip hidden files, including macOS AppleDouble resource-fork
+                # sidecars (._foo.mov) that appear on non-native filesystems —
+                # these match VIDEO_EXTENSIONS but aren't real media.
+                continue
             if filename.lower().endswith(VIDEO_EXTENSIONS):
                 files.append(root_path / filename)
     return sorted(files)
