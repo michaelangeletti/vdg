@@ -556,7 +556,7 @@ def run_mediaconch_check(output_path: Path, policy_xml: str, policy_filename: st
                 pass
 def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Path,
                            log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
-                           video_standard: VideoStandard) -> Tuple[bool, str]:
+                           video_standard: VideoStandard, clean_aperture: bool = False) -> Tuple[bool, str]:
     logger = logging.getLogger('video_transcoder')
     try:
         temp_dir = output_path.parent / "temp_framemd5"
@@ -567,8 +567,11 @@ def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Pa
         with open(process_log, 'a') as log_f:
             log_f.write("\n" + "=" * 70 + "\n" + "FRAMEMD5 LOSSLESS VALIDATION\n" + "=" * 70 + "\n\n")
 
+        # Source hash must use the same clean-aperture handling as the encode
+        # command, or a divergence there (not an actual encoding problem) will
+        # show up as a framemd5 mismatch.
         logger.info("  → Generating framemd5 for source video stream...")
-        cmd_source_video = ['ffmpeg', '-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
+        cmd_source_video = ['ffmpeg'] + clean_aperture_input_args(clean_aperture) + ['-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
         success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
         if not success:
             return False, "Failed to generate source video framemd5"
@@ -811,12 +814,19 @@ def process_h264_output(source_path: Path, output_path: Path, info: VideoInfo, c
 def clean_aperture_input_args(clean_aperture: bool) -> List[str]:
     """Input-side ffmpeg args controlling QuickTime clean aperture (clap) handling.
 
-    Default (clean_aperture=False) disables automatic clap-based cropping so the
-    full coded frame is preserved — required for true lossless v210/FFV1 transcodes.
-    Passing clean_aperture=True omits this, letting ffmpeg apply its native
-    clap crop and produce display-cropped output instead.
+    Default (clean_aperture=False) sets the generic decoder option apply_cropping=0,
+    disabling automatic frame cropping (from the clap atom's Frame Cropping side data)
+    so the full coded frame is preserved — required for true lossless v210/FFV1
+    transcodes. Passing clean_aperture=True omits this, leaving apply_cropping at its
+    default (1/enabled), so ffmpeg applies the clap crop and produces display-cropped
+    output instead.
+
+    NOTE: an earlier version of this used `-flags2 +ignorecrop`, which does NOT
+    affect this container-derived crop (it only applies to codec-level SPS
+    conformance-window cropping) — confirmed via MediaInfo on real test files
+    that ignorecrop left 720x486 sources cropped to 704x480 either way.
     """
-    return [] if clean_aperture else ["-flags2", "+ignorecrop"]
+    return [] if clean_aperture else ["-apply_cropping", "0"]
 
 def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, video_standard: VideoStandard,
                         process_log: Path, log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
@@ -837,7 +847,7 @@ def process_v210_output(source_path: Path, output_path: Path, info: VideoInfo, v
         logger.info(f"Starting framemd5 lossless validation for {source_path.name}")
         is_valid, validation_msg = validate_v210_lossless(
             source_path, output_path, process_log, log_dir,
-            keep_framemd5, keep_mediaconch, video_standard)
+            keep_framemd5, keep_mediaconch, video_standard, clean_aperture)
         if not is_valid:
             logger.error(f"v210 lossless validation FAILED: {validation_msg}")
             if output_path.exists():
@@ -860,7 +870,8 @@ def process_prores_output(source_path: Path, output_path: Path, info: VideoInfo,
         return False
 
 def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Path,
-                           log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool) -> Tuple[bool, str]:
+                           log_dir: Path, keep_framemd5: bool, keep_mediaconch: bool,
+                           clean_aperture: bool = False) -> Tuple[bool, str]:
     """Framemd5 + audio streamhash validation for FFV1 output, with digest logging,
     optional framemd5 file retention, and MediaConch policy check."""
     logger = logging.getLogger('video_transcoder')
@@ -873,8 +884,11 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
         with open(process_log, 'a') as log_f:
             log_f.write("\n" + "=" * 70 + "\n" + "FRAMEMD5 LOSSLESS VALIDATION (FFV1)\n" + "=" * 70 + "\n\n")
 
+        # Source hash must use the same clean-aperture handling as the encode
+        # command, or a divergence there (not an actual encoding problem) will
+        # show up as a framemd5 mismatch.
         logger.info("  → Generating framemd5 for source video stream...")
-        cmd_source_video = ['ffmpeg', '-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
+        cmd_source_video = ['ffmpeg'] + clean_aperture_input_args(clean_aperture) + ['-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
         success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
         if not success:
             return False, "Failed to generate source video framemd5"
@@ -1003,7 +1017,7 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
             return False
         logger.info(f"Starting framemd5 lossless validation for {source_path.name}")
         is_valid, validation_msg = validate_ffv1_lossless(
-            source_path, output_path, process_log, log_dir, keep_framemd5, keep_mediaconch)
+            source_path, output_path, process_log, log_dir, keep_framemd5, keep_mediaconch, clean_aperture)
         if not is_valid:
             logger.error(f"FFV1 lossless validation FAILED: {validation_msg}")
             if output_path.exists():

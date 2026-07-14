@@ -26,18 +26,25 @@ At **v1.3.0**, with **v1.4.0** planned as an end-of-month update.
 
 ## Queued for v1.4.0
 
-- Switch ffprobe `VideoInfo` to use `coded_width`/`coded_height` instead of `width`/`height` — critical fix for macOS FFmpeg 7.x+, which honors QuickTime `clap` clean aperture atoms and crops 720×486 v210 down to 704×480 before encoding, corrupting preservation masters. (Ubuntu with FFmpeg 6.1.1 is unaffected.)
-- Add `--clean-aperture` flag for explicit display-dimension mode.
+Shipped (untested on Ubuntu/other clap-free sources yet, but macOS-verified — see below):
+- `coded_width`/`coded_height` now used by default in `VideoInfo` instead of `width`/`height`.
+- `--clean-aperture` flag: default disables automatic clean-aperture cropping via `-apply_cropping 0` (see Key Learnings); passing the flag lets ffmpeg apply its native clap crop instead.
+- VFR source detection (`r_frame_rate` vs `avg_frame_rate` divergence) — quarantines the source and skips the transcode instead of producing a corrupt lossless roundtrip.
+- Any v210/FFV1 failure (not just VFR) now moves the source into a `QUARANTINE` folder under `output_dir` for review, instead of leaving it mixed in with untried files.
+- `--force-anamorphic` flag: forces 854×480 scaling for SD sources mistagged as 4:3 despite being anamorphic squeezed footage.
+- Filename disambiguation when the same unique ID has multiple role codes (e.g. `_pm.mov` + `_sh.mp4`) — previously these collided on the same output filename; now the source extension is appended (`_mov_sl.mp4` / `_mp4_sl.mp4`).
+
+Still open:
 - Log a warning when coded and display dimensions differ.
-- Add VFR source detection warning (vendor v210 files that are technically variable frame rate cause frame count discrepancies and false framemd5 failures).
 - Add `--keep-failed` flag to retain validation-failed output files, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting them.
-- Commit the `--Policy=` MediaConch fix properly to GitHub.
 
 ## Key learnings & principles
 
 - **FFmpeg version divergence between macOS and Ubuntu is a recurring source of bugs**, particularly around `clap` atom handling and container behavior. Always consider both platforms when touching video probing/encoding code.
 - **framemd5 for video, streamhash for audio.** Audio framemd5 validation fails due to container re-packetization differences between MKV and MOV; streamhash is correct for lossless audio validation.
-- **`coded_width`/`coded_height` vs. `width`/`height`.** macOS FFmpeg 7.x+ applies clean aperture cropping to display dimensions; coded dimensions must be used for preservation master encoding.
+- **`coded_width`/`coded_height` vs. `width`/`height`.** On FFmpeg 8.1.2 (macOS), ffprobe's `width`/`height` were observed equal to `coded_width`/`coded_height` for a clap-tagged v210 source — the crop instead showed up as stream-level `Side data: Frame Cropping` (crop_top/bottom/left/right). Using coded dimensions is still correct/harmless, but the real crop mechanism at transcode time is separate — see next point.
+- **The actual clean-aperture crop is controlled by the generic decoder option `-apply_cropping`** (boolean, default `true`), not `-flags2 +ignorecrop` (that only affects codec-level SPS conformance-window cropping, not container-derived `clap` side data). Confirmed empirically on a real file (`bm994hd4640_pm.mov`, 720x486 with clap crop 8/8/3/3 → 704x480 display): `-flags2 +ignorecrop` had **no effect** (still cropped to 704x480 either way via MediaInfo), while `-apply_cropping 0` is the correct flag to preserve the full coded frame for lossless FFV1/v210 masters. `vdg`'s `--clean-aperture` flag toggles this (default off = `-apply_cropping 0` = full frame preserved).
+- **framemd5 validation only proves internal self-consistency, not true losslessness against the original.** If the source-hash command and the encode command don't use identical crop-handling flags, framemd5 can pass while silently comparing two equally-wrong (or two equally-right) results — it can't catch a crop that's applied consistently to both sides. Always verify actual pixel dimensions (MediaInfo/ffprobe on the output) when testing crop-related fixes, not just the framemd5 PASS.
 - **VFR sources break frame count assumptions.** Vendor-delivered v210 files may technically be variable frame rate, causing false validation failures on round-trip transcoding.
 - **Standard Homebrew FFmpeg bottles omit `libopenjpeg`.** Machines needing correct JP2 output need the `homebrew-ffmpeg/ffmpeg` tap built `--with-openjpeg`.
 - **Preserve all existing logic when adding features.** Changes should be surgical — only modify what's necessary.

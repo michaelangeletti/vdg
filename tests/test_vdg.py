@@ -252,7 +252,7 @@ class TestComputeCollidingStems:
 
 class TestCleanApertureInputArgs:
     def test_default_disables_clap_crop(self):
-        assert clean_aperture_input_args(False) == ["-flags2", "+ignorecrop"]
+        assert clean_aperture_input_args(False) == ["-apply_cropping", "0"]
 
     def test_clean_aperture_true_omits_flag(self):
         assert clean_aperture_input_args(True) == []
