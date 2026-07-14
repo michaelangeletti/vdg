@@ -22,9 +22,9 @@ Three derivative types, each with a strict three-character suffix convention:
 
 ## Current state
 
-At **v1.4.1** (pending next version bump) — real-world testing after the 1.4.0 feature push found and fixed 4 bugs in that release (see Key Learnings): the AppleDouble false-positive, the VFR average-check blind spot, the same-extension filename collision overwrite, and `--force-anamorphic` being silently undone by ffmpeg's default SAR handling. Also added command logging and, most recently, the clean-aperture dimension warning + `--keep-failed` — the last two items from the original v1.4.0 roadmap are now done too (see below).
+At **v1.4.2**. This round of work (v1.4.0 → v1.4.2) is closed out — no fixes or features currently on the table. Future issues get filed in GitHub Issues and dealt with systematically later, rather than as an open-ended stream. Next session's focus is a full README.md/MANUAL.md rewrite covering everything shipped in this round (see Documentation TODO below — expand it beyond just the clean-aperture explanation to cover all of v1.4).
 
-## Shipped in v1.4.0 / v1.4.1
+## Shipped in v1.4.0 / v1.4.1 / v1.4.2
 
 - `coded_width`/`coded_height` now used by default in `VideoInfo` instead of `width`/`height`.
 - `--clean-aperture` flag: default disables automatic clean-aperture cropping via `-apply_cropping 0` (see Key Learnings); passing the flag lets ffmpeg apply its native clap crop instead. Verified against a real clap-tagged v210 source (macOS, FFmpeg 8.1.2) — MediaInfo confirmed 720x486 preserved by default, 704x480 with `--clean-aperture`.
@@ -37,6 +37,7 @@ At **v1.4.1** (pending next version bump) — real-world testing after the 1.4.0
 - `--keep-failed` flag: retains v210/FFV1 output that fails lossless validation, renamed with a `_VALIDATION_FAILED` suffix, instead of deleting it — useful for inspecting what actually went wrong.
 - FFV1 output's `VENDOR_ID` tag is now explicitly set to `Apple QuickTime` — but only when the source is a genuine QuickTime file (`major_brand` = `qt  `, via a new `VideoInfo.is_quicktime` field), instead of silently carrying through the source's own per-stream `vendor_id` tag (observed as `KeyG` — a capture-chain leftover, not meaningful authorship info). `-ffv1` isn't QuickTime-exclusive — MXF/MPEG/other non-QuickTime sources are left untouched, since "Apple QuickTime" would be actively wrong there.
 - "AAC encoder: ..." is now only logged when `-h264` is requested — it was misleading on lossless-only (`-v210`/`-ffv1`) runs, where audio is PCM copy, not AAC.
+- Dimension/clean-aperture warnings no longer print twice per file — `get_video_info()` takes a `warn` flag; the initial file-list scan logs it once, actual processing suppresses the duplicate.
 
 ## Queued for next release
 
