@@ -1074,15 +1074,17 @@ def strip_role_code(stem: str) -> str:
             return stem[:-3]
     return stem
 
-def process_single_video(source_path: Path, config: Config, completed_set: Set[str], colliding_stems: Set[str] = frozenset()) -> ProcessingResult:
+def process_single_video(source_path: Path, config: Config, completed_set: Set[str], filename_disambiguation: Dict[str, str] = None) -> ProcessingResult:
     logger = logging.getLogger('video_transcoder')
     base_name, root_name = source_path.name, sanitize_filename(source_path.stem)
     base_stem = strip_role_code(root_name)
-    if base_stem in colliding_stems:
+    disambig_suffix = (filename_disambiguation or {}).get(base_name)
+    if disambig_suffix:
         # Same unique ID with multiple role codes (e.g. _pm.mov + _sh.mp4) would
         # otherwise collide on the same output filename — disambiguate with the
-        # source file's original extension.
-        base_stem = f"{base_stem}_{source_path.suffix.lstrip('.').lower()}"
+        # source extension, or role_code + extension if extension alone isn't
+        # unique within the group (e.g. _pm.mov + _sh.mov).
+        base_stem = f"{base_stem}_{disambig_suffix}"
     output_paths = {}
     if config.output_h264:
         output_paths['h264'] = config.output_dir / f"{base_stem}_sl.mp4"
@@ -1311,14 +1313,43 @@ def print_summary(stats: ProcessingStats, start_time: datetime):
     else:
         logger.error("JOB FAILED - No files were successfully processed")
 
-def compute_colliding_stems(files: List[Path]) -> Set[str]:
-    """Find base_stems (post role-code-strip) shared by more than one distinct
-    source file — e.g. an _pm.mov and an _sh.mp4 for the same unique ID."""
-    stem_to_names: Dict[str, Set[str]] = {}
+def _original_role_code(stem: str) -> str:
+    """Return the role code (without leading underscore) a stem ends with, or ''."""
+    for code in ROLE_CODES:
+        if stem.endswith(code):
+            return code.lstrip('_')
+    return ""
+
+def compute_filename_disambiguation(files: List[Path]) -> Dict[str, str]:
+    """Map each source filename to a disambiguating suffix to append to its
+    base_stem, for files that share a base_stem (post role-code-strip) with
+    another file — e.g. an _pm.mov and an _sh.mp4 for the same unique ID.
+
+    Tries the source extension alone first (matches the common case: two
+    different container formats for the same ID). If the extension alone
+    isn't unique within the group — e.g. an _pm.mov and an _sh.mov sharing
+    the same container — falls back to role_code + extension instead, which
+    is guaranteed unique as long as the source files themselves aren't exact
+    duplicates.
+    """
+    stem_groups: Dict[str, List[Path]] = {}
     for f in files:
         stem = strip_role_code(sanitize_filename(f.stem))
-        stem_to_names.setdefault(stem, set()).add(f.name)
-    return {stem for stem, names in stem_to_names.items() if len(names) > 1}
+        stem_groups.setdefault(stem, []).append(f)
+
+    disambiguation: Dict[str, str] = {}
+    for stem, group in stem_groups.items():
+        if len(group) < 2:
+            continue
+        ext_tags = [f.suffix.lstrip('.').lower() for f in group]
+        if len(set(ext_tags)) == len(group):
+            for f, ext in zip(group, ext_tags):
+                disambiguation[f.name] = ext
+        else:
+            for f, ext in zip(group, ext_tags):
+                role_code = _original_role_code(sanitize_filename(f.stem))
+                disambiguation[f.name] = f"{role_code}_{ext}" if role_code else ext
+    return disambiguation
 
 def process_batch(config: Config) -> ProcessingStats:
     logger = logging.getLogger('video_transcoder')
@@ -1331,17 +1362,18 @@ def process_batch(config: Config) -> ProcessingStats:
     print_file_list(files)
     completed_set = get_completed_files(config.csv_log)
     logger.info(f"Found {len(completed_set)} previously completed files")
-    colliding_stems = compute_colliding_stems(files)
-    if colliding_stems:
-        logger.warning(f"Found {len(colliding_stems)} unique ID(s) with multiple role codes — "
-                       f"disambiguating output filenames with source extension")
+    filename_disambiguation = compute_filename_disambiguation(files)
+    if filename_disambiguation:
+        affected_ids = len({strip_role_code(sanitize_filename(Path(name).stem)) for name in filename_disambiguation})
+        logger.warning(f"Found {affected_ids} unique ID(s) with multiple role codes — "
+                       f"disambiguating output filenames")
     session_completed, session_quarantined = set(), set()
     mode = "CLEANUP" if config.cleanup_only else "PROCESSING"
     print(f"--- Starting {mode} MODE ---\n")
 
     if config.workers > 1 and not config.cleanup_only:
         with ProcessPoolExecutor(max_workers=config.workers) as executor:
-            futures = {executor.submit(process_single_video, f, config, completed_set, colliding_stems): f for f in files}
+            futures = {executor.submit(process_single_video, f, config, completed_set, filename_disambiguation): f for f in files}
             with tqdm(total=len(files), unit="file", desc="Total Progress", position=0) as pbar:
                 for future in as_completed(futures):
                     result = future.result()
@@ -1366,7 +1398,7 @@ def process_batch(config: Config) -> ProcessingStats:
     else:
         with tqdm(total=len(files), unit="file", desc="Total Progress", position=0) as pbar:
             for file_path in files:
-                result = process_single_video(file_path, config, completed_set, colliding_stems)
+                result = process_single_video(file_path, config, completed_set, filename_disambiguation)
                 log_to_csv(config.csv_log, result, config.dry_run)
                 if result.status == ProcessStatus.SUCCESS:
                     stats.success += 1

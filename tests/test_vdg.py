@@ -15,7 +15,7 @@ from vdg.cli import (
     detect_video_standard,
     calculate_output_fps,
     get_bitrate_config,
-    compute_colliding_stems,
+    compute_filename_disambiguation,
     clean_aperture_input_args,
     collect_video_files,
     VideoStandard,
@@ -221,30 +221,52 @@ class TestCalculateScalingParamsForceAnamorphic:
 
 
 # ---------------------------------------------------------------------------
-# compute_colliding_stems
+# compute_filename_disambiguation
 # ---------------------------------------------------------------------------
 
-class TestComputeCollidingStems:
-    def test_same_id_different_role_codes_collide(self):
+class TestComputeFilenameDisambiguation:
+    def test_same_id_different_extensions(self):
         files = [
             Path("wb824kh0844_At_Home_But_Not_At_Home_2020_pm.mov"),
             Path("wb824kh0844_At_Home_But_Not_At_Home_2020_sh.mp4"),
         ]
-        assert compute_colliding_stems(files) == {"wb824kh0844_At_Home_But_Not_At_Home_2020"}
+        result = compute_filename_disambiguation(files)
+        assert result == {
+            "wb824kh0844_At_Home_But_Not_At_Home_2020_pm.mov": "mov",
+            "wb824kh0844_At_Home_But_Not_At_Home_2020_sh.mp4": "mp4",
+        }
+
+    def test_same_id_same_extension_falls_back_to_role_code(self):
+        # Regression: bm994hd4640_pm.mov + bm994hd4640_sh.mov both .mov —
+        # extension alone collided and silently overwrote one output.
+        # Must fall back to role_code + extension for the whole group.
+        files = [
+            Path("bm994hd4640_pm.mov"),
+            Path("bm994hd4640_sh.mov"),
+            Path("bm994hd4640_sl.mp4"),
+        ]
+        result = compute_filename_disambiguation(files)
+        assert result == {
+            "bm994hd4640_pm.mov": "pm_mov",
+            "bm994hd4640_sh.mov": "sh_mov",
+            "bm994hd4640_sl.mp4": "sl_mp4",
+        }
+        # Confirm every disambiguated stem is actually unique.
+        assert len(set(result.values())) == 3
 
     def test_unique_stems_do_not_collide(self):
         files = [
             Path("file_one_pm.mov"),
             Path("file_two_sh.mp4"),
         ]
-        assert compute_colliding_stems(files) == set()
+        assert compute_filename_disambiguation(files) == {}
 
     def test_no_role_code_no_collision(self):
         files = [Path("vendor_delivery.mov")]
-        assert compute_colliding_stems(files) == set()
+        assert compute_filename_disambiguation(files) == {}
 
     def test_empty_file_list(self):
-        assert compute_colliding_stems([]) == set()
+        assert compute_filename_disambiguation([]) == {}
 
 
 # ---------------------------------------------------------------------------
