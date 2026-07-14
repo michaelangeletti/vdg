@@ -154,6 +154,7 @@ class VideoInfo:
     codec: str
     interlaced: bool
     is_vfr: bool
+    is_quicktime: bool
 
 @dataclass
 class ProcessingResult:
@@ -428,11 +429,17 @@ def get_video_info(file_path: Path) -> VideoInfo:
             f"default preserves the full coded frame; pass --clean-aperture to honor the crop instead"
         )
 
+    # major_brand='qt  ' identifies a genuine QuickTime file specifically — the mov
+    # demuxer also handles plain MP4/M4A/3GP files under the same format_name bucket,
+    # so format_name alone can't distinguish "actually QuickTime" from those.
+    major_brand = data['format'].get('tags', {}).get('major_brand', '').strip()
+    is_quicktime = major_brand == 'qt'
+
     return VideoInfo(
         width=width, height=height, duration=duration,
         fps=fps, dar=v_stream.get('display_aspect_ratio', '4:3'), has_audio=a_stream is not None,
         total_frames=total_frames, codec=v_stream.get('codec_name', 'unknown'),
-        interlaced=interlaced, is_vfr=is_vfr
+        interlaced=interlaced, is_vfr=is_vfr, is_quicktime=is_quicktime
     )
 
 def detect_video_standard(width: int, height: int, fps: float) -> VideoStandard:
@@ -1075,19 +1082,22 @@ def process_ffv1_output(source_path: Path, output_path: Path, info: VideoInfo,
                     Apple Silicon and modern x86.
       -slicecrc 1   Embeds a CRC in every slice header for per-slice error detection.
       Audio is copied without re-encoding to preserve the original PCM stream exactly.
-      vendor_id is overridden to "Apple QuickTime" — without this, ffmpeg carries the
-      source's own per-stream vendor_id tag straight through (observed as "KeyG" on
-      this lab's QuickTime sources, a leftover from the original capture chain rather
-      than anything meaningful about authorship).
+      When the source is a genuine QuickTime file (major_brand 'qt  '), vendor_id
+      is overridden to "Apple QuickTime" — without this, ffmpeg carries the source's
+      own per-stream vendor_id tag straight through (observed as "KeyG" on this lab's
+      QuickTime sources, a leftover from the original capture chain rather than
+      anything meaningful about authorship). Left untouched for non-QuickTime
+      sources (MXF, MPEG, etc.), where "Apple QuickTime" would be actively wrong.
     """
     logger = logging.getLogger('video_transcoder')
     try:
+        vendor_metadata = ["-metadata:s:v:0", "vendor_id=Apple QuickTime"] if info.is_quicktime else []
         cmd = [
             "ffmpeg", "-y"] + clean_aperture_input_args(clean_aperture) + [
             "-i", str(source_path),
             "-map", "0:v", "-map", "0:a",
             "-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", "16", "-slicecrc", "1",
-            "-metadata:s:v:0", "vendor_id=Apple QuickTime",
+        ] + vendor_metadata + [
             "-c:a", "copy",
             str(output_path)
         ]
