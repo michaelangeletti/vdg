@@ -13,6 +13,7 @@ import json
 import math
 import csv
 import shutil
+import shlex
 import re
 import random
 import argparse
@@ -488,7 +489,13 @@ def validate_output(file_path: Path, timeout: int = VALIDATION_TIMEOUT) -> Tuple
     except Exception as e:
         return False, str(e)
 
-def run_validation_command_with_spinner(cmd: List[str], description: str) -> Tuple[bool, str]:
+def run_validation_command_with_spinner(cmd: List[str], description: str, log_file: Optional[Path] = None) -> Tuple[bool, str]:
+    if log_file:
+        try:
+            with open(log_file, 'a') as f:
+                f.write(f"\nCOMMAND ({description}): {shlex.join(str(c) for c in cmd)}\n")
+        except Exception as e:
+            logging.getLogger('video_transcoder').warning(f"Failed to write command to log: {e}")
     spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     result_container = {'result': None, 'done': False}
     def run_command():
@@ -531,6 +538,7 @@ def run_mediaconch_check(output_path: Path, policy_xml: str, policy_filename: st
             log_f.write("\n" + "=" * 70 + "\n")
             log_f.write("MEDIACONCH POLICY CHECK\n")
             log_f.write("=" * 70 + "\n")
+            log_f.write(f"Command: {shlex.join(cmd)}\n")
             log_f.write(f"Policy:  {policy_filename}\n")
             log_f.write(f"File:    {output_path.name}\n")
             log_f.write(f"Result:  {'PASS' if passed else 'FAIL'}\n")
@@ -572,13 +580,13 @@ def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Pa
         # show up as a framemd5 mismatch.
         logger.info("  → Generating framemd5 for source video stream...")
         cmd_source_video = ['ffmpeg'] + clean_aperture_input_args(clean_aperture) + ['-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
-        success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
+        success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video", process_log)
         if not success:
             return False, "Failed to generate source video framemd5"
 
         logger.info("  → Generating framemd5 for output video stream...")
         cmd_output_video = ['ffmpeg', '-i', str(output_path), '-map', '0:v:0', '-f', 'framemd5', str(output_video_md5)]
-        success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video")
+        success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video", process_log)
         if not success:
             return False, "Failed to generate output video framemd5"
 
@@ -604,7 +612,7 @@ def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Pa
 
         logger.info("  → Generating hash for source audio stream(s)...")
         cmd_source_audio = ['ffmpeg', '-i', str(source_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
-        success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio")
+        success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio", process_log)
         audio_passed = False
         source_audio_hash = source_audio_hash.strip() if success else ""
         output_audio_hash = ""
@@ -613,7 +621,7 @@ def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Pa
                 log_f.write("Audio validation skipped: no audio stream or failed to hash source\n")
         else:
             cmd_output_audio = ['ffmpeg', '-i', str(output_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
-            success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio")
+            success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio", process_log)
             output_audio_hash = output_audio_hash.strip()
             if not success:
                 return False, "Failed to generate output audio hash"
@@ -676,6 +684,12 @@ def validate_v210_lossless(source_path: Path, output_path: Path, process_log: Pa
 def run_ffmpeg_with_progress(cmd: List[str], total_frames: int, description: str, log_file: Optional[Path] = None) -> Tuple[bool, str]:
     if total_frames <= 0:
         total_frames = 1
+    if log_file:
+        try:
+            with open(log_file, 'a') as f:
+                f.write(f"\nCOMMAND: {shlex.join(str(c) for c in cmd)}\n\n")
+        except Exception as e:
+            logging.getLogger('video_transcoder').warning(f"Failed to write command to log: {e}")
     pbar = tqdm(total=total_frames, desc=description, unit="fr", leave=False, dynamic_ncols=True, colour='cyan')
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
     frame_pattern = re.compile(r'frame=\s*(\d+)')
@@ -889,13 +903,13 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
         # show up as a framemd5 mismatch.
         logger.info("  → Generating framemd5 for source video stream...")
         cmd_source_video = ['ffmpeg'] + clean_aperture_input_args(clean_aperture) + ['-i', str(source_path), '-map', '0:v:0', '-f', 'framemd5', str(source_video_md5)]
-        success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video")
+        success, _ = run_validation_command_with_spinner(cmd_source_video, "Hashing source video", process_log)
         if not success:
             return False, "Failed to generate source video framemd5"
 
         logger.info("  → Generating framemd5 for output video stream...")
         cmd_output_video = ['ffmpeg', '-i', str(output_path), '-map', '0:v:0', '-f', 'framemd5', str(output_video_md5)]
-        success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video")
+        success, _ = run_validation_command_with_spinner(cmd_output_video, "Hashing output video", process_log)
         if not success:
             return False, "Failed to generate output video framemd5"
 
@@ -921,7 +935,7 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
 
         logger.info("  → Generating hash for source audio stream(s)...")
         cmd_source_audio = ['ffmpeg', '-i', str(source_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
-        success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio")
+        success, source_audio_hash = run_validation_command_with_spinner(cmd_source_audio, "Hashing source audio", process_log)
         audio_passed = False
         source_audio_hash = source_audio_hash.strip() if success else ""
         output_audio_hash = ""
@@ -930,7 +944,7 @@ def validate_ffv1_lossless(source_path: Path, output_path: Path, process_log: Pa
                 log_f.write("Audio validation skipped: no audio stream or failed to hash source\n")
         else:
             cmd_output_audio = ['ffmpeg', '-i', str(output_path), '-map', '0:a', '-f', 'streamhash', '-hash', 'md5', '-']
-            success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio")
+            success, output_audio_hash = run_validation_command_with_spinner(cmd_output_audio, "Hashing output audio", process_log)
             output_audio_hash = output_audio_hash.strip()
             if not success:
                 return False, "Failed to generate output audio hash"
