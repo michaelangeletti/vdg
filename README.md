@@ -1,6 +1,6 @@
 # vdg
 
-**Video Derivative Generator** — Stanford Media Preservation Lab
+**Video Derivative Generator**
 
 `vdg` is a batch video transcoding tool for SMPL digitization and acquisition workflows. It processes video files from a source directory, generates one or more derivative formats (H.264 MP4, v210 uncompressed, ProRes 422 HQ, FFV1/MKV), produces JPEG 2000 thumbnails alongside H.264 output, validates lossless output against the source, and maintains a per-file process log and cumulative CSV summary. Sources that show signs of variable frame rate, or that fail lossless validation, are quarantined for review instead of being silently processed or left to overwrite a prior attempt.
 
